@@ -1,0 +1,13 @@
+{
+  "name": "threejs-games",
+  "private": true,
+  "description": "四款纯程序生成的 Three.js 浏览器游戏（无模型、贴图、音频文件）",
+  "scripts": {
+    "serve": "python3 -m http.server 8000",
+    "play": "node tools/play.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0",
+    "three": "0.170.0"
+  }
+}
