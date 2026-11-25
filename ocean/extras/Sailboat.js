@@ -558,16 +558,46 @@ export class Sailboat {
     return st;
   }
 
+  /**
+   * 由船体物理（ocean/vessel 的 SailingYacht.sail）直接驱动帆的外观，代替 update 里的经验调帆与横倾。
+   *   s = { side（+1：帆在 +X 左舷）, boomAngle（弧度，带符号，+ 为横杆甩向 +X）, jibSheet 0–1, luff 0–1, fill 0–1,
+   *         awLocal: { x, z }（船体坐标里桅顶处视风的去向，m/s）, aws }
+   *   船的位置、姿态（含横倾、纵摇）由调用者写在 group 上（见 ocean/vessel/three-adapter.js 的 applyToThree）。
+   */
+  applyPhysics(dt = 0, s = {}, { time, sky } = {}) {
+    this._time = time !== undefined ? time : this._time + (dt || 0);
+    if (sky) {
+      const u = this.sailMaterial.uniforms;
+      u.uKeyDir.value.copy(sky.keyLightDirection); u.uKeyColor.value.copy(sky.keyLightColor); u.uAmb.value.copy(sky.ambientColor);
+      u.uSeaAmb.value.copy(sky.ambientColor).multiplyScalar(0.22).add(new THREE.Color(0.005, 0.02, 0.03));
+    }
+    const side = s.side >= 0 ? 1 : -1, B = this._boom, target = s.boomAngle ?? side * 0.3;
+    if (dt > 0) {                                     // 横杆弹簧阻尼地跟随物理给出的角度（顺风换舷时自己甩过去）
+      const h = Math.min(dt, 1 / 30);
+      for (let k = 0; k < Math.ceil(dt / h); k++) { B.vel += ((target - B.ang) * 10 - B.vel * 3.4) * h; B.ang += B.vel * h; }
+    } else { B.ang = target; B.vel = 0; }
+    const wl = s.awLocal || { x: 0, z: -1 }, aws = s.aws ?? Math.hypot(wl.x, wl.z), st = this.sailState;
+    st.side = side; st.boomAngle = B.ang; st.luff = s.luff ?? 0; st.fill = s.fill ?? 1; st.aws = aws;
+    // 缩帆：帆的线尺寸按 reef 缩小（面积 reef²），与 Sails 的受力模型一致；平滑过渡，像慢慢收帆
+    const rf = clamp(s.reef ?? 1, 0.3, 1);
+    this._reef = this._reef === undefined || !(dt > 0) ? rf : this._reef + (rf - this._reef) * (1 - Math.exp(-dt / 1.5));
+    st.awaDeg = Math.abs(Math.atan2(-wl.x, -wl.z)) * 180 / Math.PI; st.heelTarget = 0;
+    this.model.rotation.z = 0;
+    this._updateSails(this._time, side, st.fill, st.luff, clamp(s.jibSheet ?? 0.3, 0, 1), wl.x, wl.z, aws);
+    return st;
+  }
+
   _updateSails(t, side, fill, luff, jibSheet, wlx, wlz, aws) {
     const R = this._rig;
     // 主帆：在 boomPivot 局部坐标里生成（弦向 −Z、下风 +X·side），横杆绕 y 转动
     this.boomPivot.rotation.y = -this._boom.ang;
     const pa = this._mainGeo.attributes.position.array, { nu, nv } = this._mainGeo.userData;
-    const boomLen = this._boomLen, luffLen = R.mastH - 1.6;
+    const rf = this._reef ?? 1;                       // 缩帆：线尺寸比例
+    const boomLen = this._boomLen, luffLen = (R.mastH - 1.6) * rf;
     const depth = 0.12 * fill * (1 - 0.5 * luff);
     for (let j = 0; j <= nv; j++) {
       const v = j / nv, y = 0.1 + v * luffLen;
-      const chord = (boomLen - 0.15) * Math.pow(1 - v, 0.95) + 0.18 + 0.35 * Math.sin(Math.PI * v) * (1 - v);
+      const chord = ((boomLen - 0.15) * Math.pow(1 - v, 0.95) + 0.18 + 0.35 * Math.sin(Math.PI * v) * (1 - v)) * rf;
       const tw = v * 0.22 * fill, ct = Math.cos(tw), stw = Math.sin(tw);
       for (let i = 0; i <= nu; i++) {
         const u = i / nu, k = (j * (nu + 1) + i) * 3;
@@ -583,6 +613,7 @@ export class Sailboat {
     const T = new THREE.Vector3(0, R.stem.y + 0.05, R.stem.z - 0.08), Hd = new THREE.Vector3(0, R.deckY + 8.3, R.zMast + 0.06);
     const ang = 0.12 + jibSheet * 0.75;
     const C = new THREE.Vector3(side * Math.sin(ang) * 2.7, R.deckY + 0.95, R.zBow - 0.3 - Math.cos(ang) * 2.7);
+    if (rf < 1) { Hd.sub(T).multiplyScalar(rf).add(T); C.sub(T).multiplyScalar(rf).add(T); }   // 卷帆：顶角、后角向前角收
     const nrm = new THREE.Vector3().subVectors(Hd, T).cross(new THREE.Vector3().subVectors(C, T)).normalize();
     if (nrm.x * side < 0) nrm.negate();
     const ja = this._jibGeo.attributes.position.array, ju = this._jibGeo.userData.nu, jv = this._jibGeo.userData.nv;

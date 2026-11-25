@@ -17,15 +17,27 @@
   - 风减弱或转向时，旧浪转为涌浪并衰减；
   - 浅水用 Young & Verhagen 生长律和 TMA 谱；
   - Donelan 谱形与随波龄变化的方向分布；
-  - 白浪覆盖率按 Monahan 公式自动校准，太阳闪光带宽度按 Cox–Munk 观测。
+  - 太阳闪光带宽度按 Cox–Munk 观测。
+- **白浪与飞沫**：
+  - 破碎在相机周围的世界坐标里判定：浪峰处的水平压缩超过临界陡度、偏前坡、沿浪峰分段；
+  - 泡沫按“活跃白浪 → 残留泡沫 → 泡沫丝”演化，寿命取实测值（Monahan & Lu），随水漂流；
+  - 大风时朗缪尔环流把泡沫丝聚成沿风向的条纹；
+  - 反照率按实测，覆盖率对 Monahan 观测校准；
+  - 大风时从正在破碎的浪尖撕下飞沫，水滴受重力、阻力和近海面对数风廓线作用。
+- **帆船**（[ocean/vessel/](ocean/vessel/README.md)）：
+  - 六自由度刚体，船体水压按三角面积分（静水力 + Froude–Krylov）；
+  - 阻力用 ITTC-1957 摩擦 + DSYHS 剩余阻力，龙骨与舵按有限翼展升力，帆用 ORC 系数，风用对数廓线；
+  - 航速、横倾、漂角、纵摇、砰击和尾迹角都是力平衡的结果，没有写死的极曲线；
+  - 10 节风下的极曲线与 ORC 证书实船相差不到 2%。
 - **验证**：
-  - 16 项物理单元测试；
+  - 32 项物理单元测试（风浪生长、水滴终端速度对照 Gunn & Kinzer 实测、帆船静水力 / 稳性 / 极曲线 / 固有周期 / 换舷）；
+  - 白浪覆盖率在 8–20 m/s 与 Monahan 观测相差不到 1.6 倍（破碎阈值是与风速无关的物理常数）；
   - GPU FFT 与 CPU 逐点 DFT 对照；
   - 理论 Hs 与模拟海面实测 Hs 在 ±4% 内吻合（含浅水和涌浪）。
 - **着色**：
   - 用坡度方差算粗糙度（LEAN），远处不闪；
   - 精确 Fresnel 加环境反射能量项；
-  - 浪尖透光，白浪会被短波打散，8 级以上出现沿风向的泡沫条纹；
+  - 浪尖透光，白浪下方的气泡云把海水照成青绿色，残留泡沫处毛细波被抑制；
   - 阵风在海面上吹出随风移动的暗斑（猫爪风），海天无缝过渡。
 - **演示**：
   - 6 个镜头：黄昏、风暴、晴空、月夜、黎明，以及“起浪”（从平静开始，看浪按生长律积累）；
@@ -116,7 +128,7 @@ python3 -m http.server 8000
 
 ```
 index.html                  首页
-ocean/                      可复用海面模块（说明见 ocean/README.md）
+ocean/                      可复用海面模块（说明见 ocean/README.md；帆船动力学在 ocean/vessel/）
 examples/ocean/             海面演示「风生浪」
 games/<名字>/index.html     各游戏，单文件
 games/windpost/WATER.md     《信风》的 Gerstner 水体说明
@@ -125,7 +137,7 @@ tools/play.cjs              无头浏览器试玩、截图（--root 可加载仓
 tools/artifact.cjs          独立网页 ↔ claude.ai Artifact 片段互转
 tools/build-ocean-demo.mjs  把海面演示打包成单文件 Artifact（需要 esbuild）
 tests/smoke.cjs             游戏冒烟测试（加载 → 开始 → 操作 → 截图）
-tests/ocean/                海面模块测试：物理单元测试、GPU FFT 校验、Hs 一致性、看图页
+tests/ocean/                海面模块测试：风浪 / 水滴 / 帆船单元测试、GPU FFT 校验、Hs 一致性、看图页、帆船实海检查
 ```
 
 ## 测试
@@ -147,7 +159,13 @@ node --test tests/ocean/windsea.test.mjs
 node tools/play.cjs tests/ocean/fft-check.html out/fft tests/ocean/fft-check.cjs --root=.
 ```
 
-第一条是风浪物理的单元测试（纯 Node）；第二条在浏览器里把 GPU FFT 与 CPU 逐点 DFT 对照。`tests/ocean/spectrum-check.html` 对照理论 Hs 与模拟实测 Hs。
+第一条是风浪物理的单元测试（纯 Node）；第二条在浏览器里把 GPU FFT 与 CPU 逐点 DFT 对照，并检查波谱的厄米对称。`tests/ocean/spectrum-check.html` 对照理论 Hs 与模拟实测 Hs。
+
+```bash
+node --test tests/ocean/spray.test.mjs tests/ocean/vessel.test.mjs
+```
+
+水滴动力学与帆船动力学的单元测试（纯 Node，帆船约 30 s）。`tests/ocean/vessel-check.html` 让帆船在真实的 GPU 海面上航行。
 
 ## 发布到 claude.ai
 

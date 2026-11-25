@@ -1,14 +1,16 @@
 // 风生浪 · 可复用海面模块（ocean/）的电影级演示
 //
-// 风 → WindSeaModel（按生长律起浪、积累、转涌）→ OceanSimulation（GPU FFT）→ 海面着色；
-// 同一股风还驱动帆船（视风、横倾）、阵风波纹、泡沫条纹、飞沫和雨丝的方向。
+// 风 → WindSeaModel（按生长律起浪、积累、转涌）→ OceanSimulation（GPU FFT）→ 海面着色与白浪场；
+// 同一股风还驱动帆船（ocean/vessel：六自由度刚体，帆、龙骨、舵的力与船体水压积分）、阵风波纹、飞沫和雨丝。
 import * as THREE from 'three';
-import { Ocean, Buoyancy, beaufort, seaStateScale } from '../../ocean/index.js';
+import { Ocean, beaufort, seaStateScale } from '../../ocean/index.js';
 import { SkyEnvironment } from '../../ocean/SkyEnvironment.js';
 import { CinematicComposer } from '../../ocean/CinematicComposer.js';
 import { WakeMap } from '../../ocean/WakeMap.js';
-import { Spray } from '../../ocean/Spray.js';
+import { Spray, SpumeEmitter } from '../../ocean/Spray.js';
 import { Sailboat } from '../../ocean/extras/Sailboat.js';
+import { SailingYacht } from '../../ocean/vessel/index.js';
+import { applyToThree, emitSpray, driveWake } from '../../ocean/vessel/three-adapter.js';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -55,13 +57,15 @@ try {
 }
 scene.add(ocean.mesh);
 
-const boat = new Sailboat({ sky, shadows: false });
+// 物理船体与画面船体用同一组型线参数：浮力、阻力、稳性都按画面上这条船算
+const yacht = new SailingYacht();
+const boat = new Sailboat({ hull: yacht.hull, mastHeight: yacht.options.mastHeight, sky, shadows: false });
 scene.add(boat.group);
-const buoy = new Buoyancy(boat.group, { points: boat.floatPoints, heavePeriod: 2.3, pitchPeriod: 2.7, rollPeriod: 3.4, damping: 0.32 });
 const wake = new WakeMap(renderer, { resolution: isTouch ? 256 : 512, worldSize: 256 });
 const hullWake = wake.createHullEmitter({ beam: boat.dims.beam, length: boat.dims.length });
 const spray = new Spray({ max: isTouch ? 2500 : 6000 });
 scene.add(spray.object);
+const spume = new SpumeEmitter(spray, { maxRate: isTouch ? 400 : 1400 });
 const rain = createRain(isTouch ? 2500 : 6000);
 scene.add(rain.object);
 
@@ -104,12 +108,14 @@ function createRain(n) {
 }
 
 // ------------------------------------------------------------------ 状态与镜头预设
+const windNow = new THREE.Vector2();   // 10 m 高处的瞬时风（平均风 + 阵风），x 东、y 南
 // 风向用气象习惯的“来向”方位（0° 北、90° 东）；世界坐标 −Z 为北、+X 为东
 function windVector(U, fromDeg) { const b = fromDeg * DEG; return new THREE.Vector2(-Math.sin(b) * U, Math.cos(b) * U); }
 
 const SHOTS = [
   { id: 'golden', label: '黄昏', wind: 8.5, from: 250, fetch: 400e3, depth: 3000, develop: 1, swell: { Hs: 1.6, Tp: 13, from: 225 }, tod: 17.62, clouds: 0.42, storm: 0, grade: 'golden', cam: 'low', letterbox: true, rain: false, sun: 'back', tack: 1 },
-  { id: 'storm', label: '风暴', wind: 22, from: 300, fetch: 900e3, depth: 4000, develop: 1, swell: { Hs: 2.5, Tp: 14, from: 320 }, tod: 15.4, clouds: 1, storm: 1, grade: 'storm', cam: 'chase', letterbox: true, rain: true, tack: -1 },
+  // 风暴：9 级风里 8.6 m 的船按实际做法深缩帆、放宽到 130° 真风角（横风 105° 满帆会被浪打横、横倾到 60° 以上）
+  { id: 'storm', label: '风暴', wind: 22, from: 300, fetch: 900e3, depth: 4000, develop: 1, swell: { Hs: 2.5, Tp: 14, from: 320 }, tod: 15.4, clouds: 1, storm: 1, grade: 'storm', cam: 'chase', letterbox: true, rain: true, tack: -1, twa: 130, reef: 0.45, flat: 0.5 },
   { id: 'tropical', label: '晴空', wind: 6, from: 110, fetch: 200e3, depth: 2000, develop: 1, swell: { Hs: 0.8, Tp: 11, from: 150 }, tod: 11.4, clouds: 0.3, storm: 0, grade: 'tropical', cam: 'aerial', letterbox: false, rain: false, tack: 1 },
   { id: 'moonlight', label: '月夜', wind: 6.5, from: 200, fetch: 300e3, depth: 3000, develop: 1, swell: { Hs: 1.2, Tp: 12, from: 230 }, tod: 18.55, clouds: 0.22, storm: 0, grade: 'moonlight', exposure: 0.42, cam: 'low', letterbox: true, rain: false, lantern: true, sun: 'back', tack: 1 },
   { id: 'dawn', label: '黎明', wind: 2.5, from: 30, fetch: 50e3, depth: 3000, develop: 1, swell: { Hs: 1.3, Tp: 15, from: 260 }, tod: 6.12, clouds: 0.55, storm: 0, grade: 'dawn', cam: 'low', letterbox: true, rain: false, fog: 4, sun: 'back', tack: -1 },
@@ -150,16 +156,20 @@ function applyShot(id, { instant = true } = {}) {
   const m = ocean.model;
   const w = windVector(S.windU, S.windFrom);
   m.setWind(w.x, w.y); m.snapWind();
+  windNow.copy(w);
   m.setFetch(S.fetch); m.setDepth(S.depth); m.setTimeScale(S.timeScale);
   m.calm();
   if (!p.calm) m.develop(p.develop ?? 1);
   setSwell();
-  ocean.resetWhitecaps();
-  // 船：沿风向角航行
+  ocean.resetSea();
+  // 船：自动舵保持真风角航行（右舷来风 = starboard tack）
   S.boat.tack = p.tack ?? 1;
+  S.boat.twa = (p.twa ?? 105) * DEG;
   const f = new THREE.Vector2(-w.x, -w.y).normalize();
   S.boat.yaw = Math.atan2(f.x, f.y) + S.boat.tack * S.boat.twa;
-  S.boat.speed = targetSpeed();
+  S.boat.speed = 0.3 * S.windU;
+  yacht.reset({ x: S.boat.x, z: S.boat.z, yaw: S.boat.yaw, speed: S.boat.speed });
+  yacht.setControls({ mode: 'twa', target: S.boat.twa, tack: S.boat.tack > 0 ? 'starboard' : 'port', sheet: 'auto', flat: p.flat ?? 'auto', reef: p.reef ?? 'auto' });
   boat.lantern = !!p.lantern;
   // 机位与太阳：逆光镜头把主光源转到“相机 → 船”的方向上
   setCam(p.cam, instant);
@@ -190,72 +200,26 @@ function setSwell() {
 function towardTheta(fromDeg) { const v = windVector(1, fromDeg); return Math.atan2(v.y, v.x); }
 
 // ------------------------------------------------------------------ 帆船航行
-const POLAR = [[0, 0], [35, 0], [45, 0.55], [60, 0.78], [90, 0.95], [110, 1], [135, 0.92], [160, 0.8], [180, 0.72]];
-function polar(deg) {
-  for (let i = 1; i < POLAR.length; i++) if (deg <= POLAR[i][0]) { const [a0, v0] = POLAR[i - 1], [a1, v1] = POLAR[i]; return lerp(v0, v1, (deg - a0) / (a1 - a0)); }
-  return 0.72;
-}
-function targetSpeed() {
-  const U = Math.hypot(ocean.model.meanWind.x, ocean.model.meanWind.z);
-  const reef = U > 17 ? 0.78 : 1;            // 大风缩帆
-  return clamp(0.34 * U * polar(S.boat.twa / DEG) * reef, 0, 6.8);
-}
-const _fwd = new THREE.Vector3(), _port = new THREE.Vector3(), _tmp = new THREE.Vector3(), _bow = new THREE.Vector3();
-let sailState = { heelTarget: 0 };
+// 不再用极曲线：航速、横倾、纵摇、升沉、漂角、舵角都来自 SailingYacht 的力平衡（帆的升力与阻力、
+// 龙骨与舵的升力、船体摩擦与兴波阻力、水压积分出的浮力与复原力矩），船首砸浪的飞溅来自砰击事件。
+const _fwd = new THREE.Vector3(), _port = new THREE.Vector3();
+const _wind = { x: 0, z: 0 };
 function updateBoat(dt) {
-  const B = S.boat, m = ocean.model;
-  const W = m.meanWind, U = Math.hypot(W.x, W.z);
-  if (U > 0.5) {
-    const desired = Math.atan2(-W.x / U, -W.z / U) + B.tack * B.twa;
-    B.yaw += clamp(wrapAngle(desired - B.yaw), -0.08 * dt, 0.08 * dt);
+  const B = S.boat;
+  if (dt > 0) {
+    _wind.x = windNow.x; _wind.z = windNow.y;          // 10 m 高处的瞬时风（含阵风）
+    yacht.step(dt, { ocean, wind: _wind });
   }
-  B.speed += (targetSpeed() - B.speed) * smooth(1 / 6, dt);
-  _fwd.set(Math.sin(B.yaw), 0, Math.cos(B.yaw));
-  _port.set(Math.cos(B.yaw), 0, -Math.sin(B.yaw));
-  B.x += _fwd.x * B.speed * dt; B.z += _fwd.z * B.speed * dt;
-  boat.group.position.x = B.x; boat.group.position.z = B.z; boat.group.rotation.y = B.yaw;
-  const aw = new THREE.Vector2(m.wind.x - _fwd.x * B.speed, m.wind.z - _fwd.z * B.speed);
-  sailState = boat.update(dt, { apparentWind: aw, heel: 0, time: S.time, sky }) || sailState;
-  buoy.update(dt, ocean, { heel: -(sailState.heelTarget || 0) });   // Sailboat 以桅顶倒向 +X 为正，浮力绕 Z 轴相反
-
-  // 尾迹
-  hullWake.update(dt, { x: B.x, z: B.z, forwardX: _fwd.x, forwardZ: _fwd.z, speed: B.speed });
+  applyToThree(yacht, boat, { dt, time: S.time, sky });
+  const T = yacht.telemetry, P = yacht.state.position;
+  B.x = P.x; B.z = P.z; B.yaw = T.yaw; B.speed = T.speed;
+  if (!(dt > 0)) return;
+  // 尾迹：船行波的半角与强度来自兴波阻力（高傅汝德数时尾迹变窄，Rabaud & Moisy 2013）
+  driveWake(yacht, hullWake, dt);
   wake.update(dt, B.x, B.z);
   ocean.setWake(wake.texture, wake.rect);
-
-  // 船首砸浪：船首相对水面的下沉速度越大，溅起的浪花越多
-  if (ocean.sim.ready && dt > 0) {
-    _bow.copy(boat.bowPoint); boat.group.localToWorld(_bow);
-    const imm = ocean.sampleHeight(_bow.x, _bow.z) - _bow.y;
-    const rate = (imm - B.lastImm) / dt;
-    B.lastImm = imm;
-    const n = Math.min(140, Math.max(0, (rate - 0.35) * 44 * Math.min(1, B.speed / 2.5))) + (B.speed > 3.5 && imm > -0.25 ? 3 : 0);
-    for (let i = 0; i < n; i++) {
-      const side = Math.random() < 0.5 ? -1 : 1;
-      _tmp.copy(_bow).addScaledVector(_port, side * Math.random() * 0.8).addScaledVector(_fwd, -Math.random() * 1.2);
-      _tmp.y = Math.max(_tmp.y, ocean.sampleHeight(_tmp.x, _tmp.z));
-      const v = new THREE.Vector3().copy(_fwd).multiplyScalar(B.speed * (0.3 + Math.random() * 0.5))
-        .addScaledVector(_port, side * (1.2 + Math.random() * 2.6)).add(new THREE.Vector3(m.wind.x * 0.15, 1.8 + Math.random() * 3.8 * Math.min(2, rate + 0.5), m.wind.z * 0.15));
-      spray.emit(_tmp, v, 0.025 + Math.random() * 0.09, 0.7 + Math.random() * 0.9, 0.5);
-    }
-  }
-}
-
-// 大风时从浪尖撕下的飞沫（蒲福 8 级以上明显）
-function updateSpindrift(dt) {
-  const W = ocean.model.wind, U = Math.hypot(W.x, W.z);
-  if (U < 15 || !ocean.sim.ready) return;
-  const rate = (U - 15) ** 2 * 9 * (isTouch ? 0.4 : 1);
-  let n = rate * dt;
-  while (n > 0) {
-    if (n < 1 && Math.random() > n) break;
-    n -= 1;
-    const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 110;
-    const x = camera.position.x + Math.cos(a) * r, z = camera.position.z + Math.sin(a) * r;
-    const y = ocean.sampleHeight(x, z);
-    spray.emit({ x, y: y + 0.3, z }, { x: W.x * (0.45 + Math.random() * 0.4), y: 0.6 + Math.random() * 2.2, z: W.z * (0.45 + Math.random() * 0.4) },
-      0.12 + Math.random() * 0.4, 1.4 + Math.random() * 1.8, 0.22);
-  }
+  // 砰击飞溅：入水点、射流速度（Wagner 理论约 2 倍入水速度）、强度都由船体水压积分给出
+  emitSpray(yacht, spray, { rate: isTouch ? 0.5 : 1 });
 }
 
 // ------------------------------------------------------------------ 机位
@@ -377,8 +341,8 @@ $('windDir').addEventListener('input', onWindInput);
 $('fetch').addEventListener('input', () => { S.fetch = fetchFromSlider(+$('fetch').value); ocean.model.setFetch(S.fetch); updateOutputs(); });
 $('depth').addEventListener('input', () => { S.depth = depthFromSlider(+$('depth').value); ocean.model.setDepth(S.depth); updateOutputs(); });
 $('timeScale').addEventListener('input', () => { S.timeScale = tsFromSlider(+$('timeScale').value); ocean.model.setTimeScale(S.timeScale); updateOutputs(); });
-$('calmBtn').addEventListener('click', () => { ocean.model.calm(); ocean.resetWhitecaps(); toast('海面已归零，浪从现在开始按风时生长'); });
-$('developBtn').addEventListener('click', () => { ocean.model.develop(1); ocean.resetWhitecaps(); toast('已跳到当前风速、风区允许的极限海况'); });
+$('calmBtn').addEventListener('click', () => { ocean.model.calm(); ocean.resetSea(); toast('海面已归零，浪从现在开始按风时生长'); });
+$('developBtn').addEventListener('click', () => { ocean.model.develop(1); ocean.resetSea(); toast('已跳到当前风速、风区允许的极限海况'); });
 for (const id of ['swellH', 'swellT', 'swellDir']) $(id).addEventListener('input', () => {
   S.swell = { Hs: +$('swellH').value, Tp: +$('swellT').value, from: +$('swellDir').value };
   setSwell(); updateOutputs();
@@ -493,21 +457,29 @@ function updateReadouts() {
     ['波速 · 波龄', r.Tp ? `${r.phaseSpeed.toFixed(1)} m/s · ${r.waveAge.toFixed(2)}` : '—'],
     ['发展阶段', r.stageName + (r.stage === 'duration' && r.timeToLimit > 0 ? ` · 还需 ${fmtTime(r.timeToLimit)}` : '')],
     ['白浪覆盖', `${(r.whitecap * 100).toFixed(2)}% / <span class="ok">${(r.whitecapMeasured * 100).toFixed(2)}%</span>`],
+    ['其中正在破碎', `<span class="ok">${(r.whitecapActive * 100).toFixed(2)}%</span>`],
     ['均方坡度', `${r.mssCoxMunk.toFixed(3)} / <span class="ok">${r.mssSimulated.toFixed(3)}</span>`],
     ['浪级', `${ss.degree} 级 ${ss.name}`],
   ];
+  // 帆船：全部来自力平衡（见 ocean/vessel）
+  const T = yacht.telemetry;
+  if (T.speedKn !== undefined) rows.push(
+    ['航速', `${T.speedKn.toFixed(1)} kn · Fn ${T.Fn.toFixed(2)}`],
+    ['横倾 · 漂角', `${Math.abs(T.heel).toFixed(0)}° · ${Math.abs(T.leeway).toFixed(1)}°`],
+    ['视风', `${T.awsKn.toFixed(0)} kn · ${Math.abs(T.awa).toFixed(0)}°`],
+    ['舵角 · 缩帆', `${Math.abs(T.rudderAngle).toFixed(1)}° · ${Math.round((1 - T.reef) * 100)}%`],
+  );
   $('read').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   // 能量占优的那部分的周期：微风叠长涌时显示涌浪周期
   const Tdom = r.HsSwell > r.HsWind ? r.TpSwell : r.Tp;
   $('status').innerHTML = `<b>${bf.force} 级${bf.name}</b> · ${ss.name} · Hs ${r.Hs.toFixed(1)} m · 周期 ${Tdom ? Tdom.toFixed(1) : '—'} s <span class="dim">· ${r.HsSwell > r.HsWind ? '涌浪为主' : r.stageName}</span>`;
   drawSpark();
 }
-$('read').title = '理论值来自风浪生长律；绿色为 GPU 模拟海面的实测值。白浪覆盖：Monahan (1980) / 实测；均方坡度：Cox–Munk (1954) 总量 / 模拟已解析部分（波长 > 约 0.2 m）';
+$('read').title = '理论值来自风浪生长律；绿色为 GPU 模拟海面的实测值。白浪覆盖：Monahan (1980) / 白浪场实测（活跃 + 残留泡沫，3 s 平均）；均方坡度：Cox–Munk (1954) 总量 / 模拟已解析部分（波长 > 约 0.2 m）';
 
 // ------------------------------------------------------------------ 主循环
 const clock = new THREE.Clock();
 let frames = 0, readoutTimer = 0, gustT = Math.random() * 100;
-const windNow = new THREE.Vector2();
 function frame() {
   const dtReal = Math.min(clock.getDelta(), 1 / 20);
   const dt = S.paused ? 0 : dtReal;
@@ -526,7 +498,7 @@ function frame() {
   scene.environment = sky.environment;
   scene.environmentIntensity = sky.environmentIntensity;
   ocean.update(dt, camera, sky);
-  updateSpindrift(dt);
+  spume.update(dt, ocean, camera);   // 大风时从正在破碎的浪峰撕下的飞沫
   spray.update(dt, { keyLightDirection: sky.keyLightDirection, keyLightColor: sky.keyLightColor, ambientColor: sky.ambientColor, wind: windNow, waterHeight: (x, z) => waterAt(x, z) });
   rain.amount = lerp(rain.amount, S.rain ? 1 : 0, smooth(1.5, dtReal));
   rain.update(dt, camera.position, windNow, S.time, sky.ambientColor);
@@ -546,19 +518,21 @@ renderer.setAnimationLoop(frame);
 
 // 测试钩子（控制台）
 window.__demo = {
-  ocean, sky, boat, post, S, applyShot, setCam,
+  ocean, sky, boat, yacht, post, S, applyShot, setCam,
   /** 手动推进 n 帧（不渲染），用于自动化测试 */
   async step(n = 30, dt = 1 / 30) {
     for (let i = 0; i < n; i++) {
       S.time += dt; updateBoat(dt); updateCamera(dt);
       sky.update(dt, { camera, timeOfDay: S.tod, cloudCover: S.clouds, storm: S.storm, wind: windNow, sunAzimuth: S.sunAz });
       ocean.update(dt, camera, sky);
-      if (i % 8 === 7) { const s0 = ocean.sim.measured.foamSamples; for (let k = 0; k < 60 && ocean.sim.measured.foamSamples === s0; k++) await new Promise((r) => setTimeout(r, 5)); }
+      if (i % 8 === 7) { const s0 = ocean.foam.stats.samples; for (let k = 0; k < 60 && ocean.foam.stats.samples === s0; k++) await new Promise((r) => setTimeout(r, 5)); }
     }
   },
   debug() {
     const r = ocean.readout;
     return { shot: S.shot, cam: S.cam, Hs: r.Hs, simHs: r.simulatedHs, Tp: r.Tp, stage: r.stage, whitecap: r.whitecap, whitecapSim: r.whitecapMeasured,
-      boat: { x: S.boat.x, z: S.boat.z, y: boat.group.position.y, speed: S.boat.speed }, spray: spray.count, calls: renderer.info.render.calls, tris: renderer.info.render.triangles };
+      whitecapActive: r.whitecapActive,
+      boat: (({ speedKn, heel, pitch, leeway, twa, awa, awsKn, vmgKn, rudderAngle, Fn, reef, flat }) => ({ x: S.boat.x, z: S.boat.z, y: boat.group.position.y, speedKn, heel, pitch, leeway, twa, awa, awsKn, vmgKn, rudderAngle, Fn, reef, flat }))(yacht.telemetry),
+      spray: spray.count, spume: spume.emitted, calls: renderer.info.render.calls, tris: renderer.info.render.triangles };
   },
 };

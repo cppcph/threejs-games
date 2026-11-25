@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>帆船动力学检查</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block}
+#hud{position:fixed;left:10px;top:8px;font:12px/1.45 ui-monospace,monospace;color:#e8eef2;text-shadow:0 1px 2px #000;white-space:pre}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<div id="hud"></div>
+<script type="module">
+// 把 ocean/vessel 的 SailingYacht 放到真实的 Ocean（GPU FFT + CPU 回读）上航行：
+//   window.__vessel.run(秒) 推进海面与船（不逐帧渲染），render(机位) 渲染一帧，info() 返回读数与检查量。
+// node tools/play.cjs tests/ocean/vessel-check.html <输出目录> tests/ocean/vessel-check.cjs --root=.
+import * as THREE from 'three';
+import { Ocean } from '../../ocean/index.js';
+import { SkyEnvironment } from '../../ocean/SkyEnvironment.js';
+import { Sailboat, HullGenerator } from '../../ocean/extras/Sailboat.js';
+import { Spray } from '../../ocean/Spray.js';
+import { SailingYacht } from '../../ocean/vessel/index.js';
+import { applyToThree, emitSpray, compareHullGenerator } from '../../ocean/vessel/three-adapter.js';
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1); renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.62;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(42, W / H, 0.1, 200000);
+
+const sky = new SkyEnvironment(renderer, { cubeSize: 128, quality: 'medium' });
+scene.add(sky.object); scene.add(sky.lights);
+// 风从西南偏西吹来（来向 250°，世界 −Z 为北、+X 为东），U10 = 9 m/s
+const U = 9, fromDeg = 250, b = fromDeg * Math.PI / 180;
+const wind = { x: -Math.sin(b) * U, z: Math.cos(b) * U };
+const ocean = new Ocean(renderer, { quality: 'medium', sea: { wind, fetch: 300e3, depth: 3000, timeScale: 1 } });
+ocean.model.develop(1);
+ocean.model.setBackgroundSwell({ Hs: 1.2, Tp: 11, theta: Math.atan2(wind.z, wind.x) + 0.4 });
+scene.add(ocean.mesh);
+
+const yacht = new SailingYacht();
+const boat = new Sailboat({ hull: yacht.hull, sky, shadows: false });
+scene.add(boat.group);
+const spray = new Spray({ max: 3000 });
+scene.add(spray.object);
+// 左舷受风、真风角 60°
+const windFromYaw = Math.atan2(-wind.x, -wind.z);
+yacht.setControls({ mode: 'twa', target: 60 * Math.PI / 180, tack: 'port' });
+yacht.reset({ x: 0, z: 0, yaw: windFromYaw - 60 * Math.PI / 180, speed: 2.5 });
+
+let renderMs = 0, time = 0, events = 0, maxHeel = 0, maxPitch = 0, samples = 0, sumDraft = 0, sumDraft2 = 0, readyFrames = 0;
+const wpts = [[0, 0], [0, 3], [0, -3], [0.9, 0], [-0.9, 0]];
+function sky1(dt) { sky.update(dt, { camera, timeOfDay: 16.6, cloudCover: 0.35, wind: new THREE.Vector2(wind.x, wind.z), sunAzimuth: 0.6 }); }
+function chase(mode = 'chase') {
+  const s = yacht.state, t = yacht.telemetry, f = new THREE.Vector3(Math.sin(t.yaw), 0, Math.cos(t.yaw)), port = new THREE.Vector3(f.z, 0, -f.x);
+  const p = new THREE.Vector3(s.position.x, 0, s.position.z);
+  if (mode === 'side') camera.position.copy(p).addScaledVector(port, -20).addScaledVector(f, 4).setY(2.2);
+  else camera.position.copy(p).addScaledVector(f, -21).addScaledVector(port, 9).setY(5.5);
+  camera.lookAt(p.x + f.x * 4, 2.4, p.z + f.z * 4);
+}
+sky1(0);
+chase();
+
+let errSum = 0, errMax = 0, vSum = 0, nStat = 0;
+// 等异步回读追上（真实画面里回读延迟 1–2 帧；不等的话这里的高度场会一次跳过好几帧，船被“颠”）
+async function fresh(dt) {
+  for (let k = 0; k < 60 && !(ocean.sim._rbTime >= ocean.sim.time - 2.5 * dt); k++) await new Promise((r) => setTimeout(r, 2));
+}
+async function run(seconds, dt = 1 / 30) {
+  const n = Math.round(seconds / dt);
+  for (let i = 0; i < n; i++) {
+    time += dt;
+    chase();
+    ocean.update(dt, camera, sky);
+    yacht.step(dt, { ocean, wind });
+    applyToThree(yacht, boat, { dt, time, sky });
+    events += yacht.events.length;
+    emitSpray(yacht, spray);
+    spray.update(dt, { keyLightDirection: sky.keyLightDirection, keyLightColor: sky.keyLightColor, ambientColor: sky.ambientColor, wind: new THREE.Vector2(wind.x, wind.z), waterHeight: (x, z) => ocean.sampleHeight(x, z) });
+    if (ocean.sim.ready) {
+      readyFrames++;
+      const t = yacht.telemetry;
+      if (readyFrames > 90) {
+        const e = Math.abs(Math.abs(t.twa) - 60); errSum += e * e; errMax = Math.max(errMax, e); vSum += t.speedKn; nStat++;
+        maxHeel = Math.max(maxHeel, Math.abs(t.heel)); maxPitch = Math.max(maxPitch, Math.abs(t.pitch));
+        // 船体水线原点相对船下平均水面的高度（波浪里升沉、纵摇时也应在水面附近）
+        const s = yacht.state, f = [Math.sin(t.yaw), Math.cos(t.yaw)];
+        let eta = 0; for (const [px, pz] of wpts) eta += ocean.sampleHeight(s.position.x + f[1] * px + f[0] * pz, s.position.z - f[0] * px + f[1] * pz);
+        const d = s.position.y - eta / wpts.length; sumDraft += d; sumDraft2 += d * d; samples++;
+      }
+    }
+    await fresh(dt);
+  }
+  return info();
+}
+function render(mode = 'chase') {
+  chase(mode); sky1(0);
+  scene.environment = sky.environment; scene.environmentIntensity = sky.environmentIntensity;
+  ocean.update(0, camera, sky);
+  const t0 = performance.now();
+  renderer.render(scene, camera);
+  // 读一个像素强制 GPU 完成（SwiftShader 下首帧编译着色器很慢，否则截图会超时）
+  const gl = renderer.getContext(), px = new Uint8Array(4);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  renderMs = performance.now() - t0;
+  const t = yacht.telemetry;
+  document.getElementById('hud').textContent =
+    `t ${time.toFixed(1)} s   ${t.speedKn.toFixed(2)} kn   TWA ${t.twa.toFixed(0)}°  AWA ${t.awa.toFixed(0)}°  heel ${t.heel.toFixed(1)}°  pitch ${t.pitch.toFixed(1)}°  leeway ${t.leeway.toFixed(1)}°\n` +
+    `Hs ${ocean.readout.Hs.toFixed(2)} m (sim ${ocean.readout.simulatedHs.toFixed(2)})   flat ${t.flat.toFixed(2)} reef ${t.reef.toFixed(2)}   rudder ${t.rudderAngle.toFixed(1)}°   Fn ${t.Fn.toFixed(2)}   events ${events}`;
+  return info();
+}
+function info() {
+  const t = yacht.telemetry, mean = samples ? sumDraft / samples : NaN;
+  return {
+    time, renderMs, oceanReady: ocean.sim.ready, readyFrames, Hs: ocean.readout.Hs, simHs: ocean.readout.simulatedHs,
+    speedKn: t.speedKn, twa: t.twa, awa: t.awa, heel: t.heel, pitch: t.pitch, leeway: t.leeway, rudder: t.rudderAngle, flat: t.flat, reef: t.reef, Fn: t.Fn,
+    maxHeel, maxPitch, draftMean: mean, draftRms: samples ? Math.sqrt(Math.max(0, sumDraft2 / samples - mean * mean)) : NaN,
+    twaErrRms: nStat ? Math.sqrt(errSum / nStat) : NaN, twaErrMax: errMax, meanSpeedKn: nStat ? vSum / nStat : NaN,
+    readbackLag: ocean.sim.time - ocean.sim._rbTime,
+    events, sprayCount: spray.count, finite: [t.speedKn, t.heel, t.pitch, yacht.state.position.x, yacht.state.position.y, yacht.state.quaternion.w].every(Number.isFinite),
+    boom: yacht.sail.boomAngle, sailSide: yacht.sail.side, visualBoom: boat.sailState.boomAngle,
+    hullFormulaError: Math.max(compareHullGenerator(HullGenerator, yacht.hull), compareHullGenerator(HullGenerator, HullGenerator.defaults)),
+    visualHullMatches: Object.keys(yacht.hull).every((k) => Math.abs((boat.params[k] ?? 0) - yacht.hull[k]) < 1e-12),
+  };
+}
+window.__vessel = { yacht, boat, ocean, run, render, info, ready: true };
+</script>
+</body>
+</html>

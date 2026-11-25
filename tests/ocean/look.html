@@ -59,23 +59,28 @@ function setSun(elevDeg, azDeg) {
 
 window.__look = {
   ocean,
-  async render({ elev = 8, az = 0, wind = [12, 0], develop = 1, swell = null, cam = [0, 3, 0], look = [0, 1.5, -100], fov = 52, steps = 90, debug = 0, chop = 1, depth = 2000, fetch = 600e3 } = {}) {
+  async render({ elev = 8, az = 0, wind = [12, 0], develop = 1, swell = null, cam = [0, 3, 0], look = [0, 1.5, -100], fov = 52, steps = 90, debug = 0, chop = 1, depth = 2000, fetch = 600e3, dt = 1 / 30, keep = false } = {}) {
     setSun(elev, az);
     camera.fov = fov; camera.updateProjectionMatrix();
     camera.position.set(...cam); camera.lookAt(...look);
-    ocean.model.setWind(wind[0], wind[1]); ocean.model.snapWind();
-    ocean.model.setFetch(fetch); ocean.model.setDepth(depth);
-    ocean.model.calm(); ocean.model.develop(develop);
-    ocean.model.setBackgroundSwell(swell);
-    ocean.resetWhitecaps();
+    if (!keep) {
+      // keep = true：不重置海况与泡沫，接着上一次继续推进
+      ocean.model.setWind(wind[0], wind[1]); ocean.model.snapWind();
+      ocean.model.setFetch(fetch); ocean.model.setDepth(depth);
+      ocean.model.calm(); ocean.model.develop(develop);
+      ocean.model.setBackgroundSwell(swell);
+      ocean.resetWhitecaps();
+    }
     ocean.params.choppiness = chop;
     ocean.setDebugView(debug);
     // 每 8 步（约 0.27 s 海面时间）等一次异步测量完成，模拟实际帧率下白浪校准的节奏
     for (let i = 0; i < steps; i++) {
-      ocean.update(1 / 30, camera, light);
+      ocean.update(dt, camera, light);
       if (i % 8 === 7) {
-        const s0 = ocean.sim.measured.foamSamples;
-        for (let k = 0; k < 60 && ocean.sim.measured.foamSamples === s0; k++) await new Promise((r) => setTimeout(r, 5));
+        // 软件渲染下 GPU 远慢于 JS：同步读一个像素，免得命令积压
+        const gl = renderer.getContext(); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+        const s0 = ocean.foam.stats.samples;
+        for (let k = 0; k < 60 && ocean.foam.stats.samples === s0; k++) await new Promise((r) => setTimeout(r, 5));
       }
     }
     if (window.__mode === 'direct') renderer.render(scene, camera);

@@ -97,7 +97,7 @@ body.clean .hud { display: none; }
 <canvas id="view" aria-label="实时渲染的海面"></canvas>
 <div class="hud" id="hud">
   <div class="brand">
-    <h1>风生浪<small>WINDSEA · 风与浪物理一致的海面</small></h1>
+    <h1>风生浪<small>WINDSEA · 风、浪、白浪与帆船物理一致的海面</small></h1>
     <div class="status" id="status">正在起浪…</div>
   </div>
 
@@ -121,6 +121,8 @@ body.clean .hud { display: none; }
       <div class="row"><label for="swellT">周期</label><input id="swellT" type="range" min="6" max="20" step="0.5"><output id="swellTOut"></output></div>
       <div class="row"><label for="swellDir">来向</label><input id="swellDir" type="range" min="0" max="359" step="1"><output id="swellDirOut"></output></div>
 
+      <p class="note">白浪：局部水平压缩超过约 28% 的浪峰破碎，泡沫按实测寿命从活跃白浪变成残留泡沫、随水漂流，大风时聚成沿风向的条纹。帆船：航速、横倾、漂角都来自帆、龙骨、舵与船体水压的力平衡；风暴镜头里深缩帆、放宽航向。</p>
+
       <h3>读数（理论 / 模拟实测）</h3>
       <dl class="read" id="read"></dl>
       <canvas class="spark" id="spark" width="640" height="156" aria-label="有效波高随海况时间的变化"></canvas>
@@ -134,7 +136,7 @@ body.clean .hud { display: none; }
       <div class="row"><label for="chop">尖峰</label><input id="chop" type="range" min="0.6" max="1.6" step="0.01"><output id="chopOut"></output></div>
       <div class="row"><label for="grade">调色</label><select id="grade"><option value="golden">黄昏</option><option value="storm">风暴</option><option value="tropical">晴空</option><option value="moonlight">月夜</option><option value="dawn">黎明</option></select><output></output></div>
       <div class="row"><label for="quality">画质</label><select id="quality"><option value="ultra">极高</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><output></output></div>
-      <div class="row"><label for="debug">调试视图</label><select id="debug"><option value="0">关闭</option><option value="1">法线</option><option value="2">泡沫</option><option value="3">粗糙度</option><option value="4">菲涅尔</option><option value="5">尾迹</option><option value="7">阵风</option><option value="8">雅可比</option></select><output></output></div>
+      <div class="row"><label for="debug">调试视图</label><select id="debug"><option value="0">关闭</option><option value="1">法线</option><option value="2">泡沫</option><option value="3">粗糙度</option><option value="4">菲涅尔</option><option value="5">尾迹</option><option value="7">阵风</option><option value="8">白浪场</option></select><output></output></div>
       <label class="check"><input type="checkbox" id="letterbox"> 2.39:1 宽银幕</label>
       <label class="check"><input type="checkbox" id="rain"> 雨</label>
       <p class="note">拖动画面转视角，滚轮推拉。快捷键：1–6 切换镜头，C 换机位，H 隐藏界面，空格暂停。</p>

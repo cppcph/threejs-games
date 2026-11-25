@@ -9,7 +9,8 @@
 //   3. 逆 FFT：Stockham 自排序基 2，先 log2N 次横向再 log2N 次纵向；三个级联
 //      在纹理里上下叠放，一次就把三级都做完；两张 MRT 纹理同时变换 4 组复数场。
 //   4. 组装：位移 (Dx,Dy,Dz)、雅可比 J、坡度一二阶矩（供 LEAN 式抗闪烁），
-//      以及持续累积的泡沫（J 低于阈值处生成，随后按指数衰减）。
+//      以及水平位移的空间导数 (λDxx, λDzz, λDxz)——白浪场（FoamField）用前两级导数之和
+//      在世界坐标里判定破碎，泡沫的生命周期也在那里演化，不再随级联纹理平铺重复。
 //   5. 回读：把位移降采样写入浮点纹理并异步读回，CPU 用来算浮力（与画面一致）。
 //
 // 坐标：级联 c 的纹理坐标 uv = x0 / L_c + 0.5/N（x0 为未位移的水平位置，x→u，z→v）。
@@ -78,10 +79,13 @@ float tma(float w) {
   if (wh < 2.0) { float t = 2.0 - wh; return 1.0 - 0.5 * t * t; }
   return 1.0;
 }
-// cos^2s(Δθ/2) 方向分布及其归一化（Γ(s+1)/Γ(s+½) ≈ √(s+¼)）
-float spreading(float dth, float s) {
+// cos^2s(Δθ/2) 方向分布及其归一化（Γ(s+1)/Γ(s+½) ≈ √(s+¼)）。
+// 用 cos²(Δθ/2) = (1 + cosΔθ)/2、cosΔθ = k̂·方向 计算，不用 atan：
+// k 落在坐标轴上时 −k 的分量是 −0.0，有的 GPU 上 atan(−0.0, x<0) 的结果不对，
+// 镜像波数的能量算错会破坏厄米对称，打包的两个实数场互相串扰（例如高度漏进 ∂Dx/∂z）
+float spreading(float cosd, float s) {
   float n = sqrt(s + 0.25) / (2.0 * sqrt(PI));
-  return n * pow(abs(cos(0.5 * dth)), 2.0 * s);
+  return n * pow(max(0.5 + 0.5 * cosd, 0.0), s);
 }
 // Hasselmann et al. (1980)：方向集中度随相对频率与波龄变化
 float hasselmannS(float w, float wp, float invAge) {
@@ -96,16 +100,16 @@ float psi(vec2 k, int c) {
   float th = tanh(min(kl * uDepth, 20.0));
   float w = sqrt(G * kl * th);
   float dwdk = G * (th + kl * uDepth * (1.0 - th * th)) / (2.0 * w);
-  float ang = atan(k.y, k.x);
+  vec2 kh = k / kl;
   float S = 0.0;
   if (uWind.x > 0.0) {
     float s = hasselmannS(w, uWind.y, 1.0 / max(uWindAge.y, 0.1));
-    S += uWind.x * dhh(w, uWind.y, uWind.w) * spreading(ang - uWind.z, s);
+    S += uWind.x * dhh(w, uWind.y, uWind.w) * spreading(dot(kh, vec2(cos(uWind.z), sin(uWind.z))), s);
   }
   for (int i = 0; i < 4; i++) {
     if (i >= uSwellCount) break;
     vec4 sw = uSwell[i];
-    S += sw.x * jonswap(w, sw.y, sw.w) * spreading(ang - sw.z, uSwellS[i]);
+    S += sw.x * jonswap(w, sw.y, sw.w) * spreading(dot(kh, vec2(cos(sw.z), sin(sw.z))), uSwellS[i]);
   }
   S *= tma(w);
   // 最细一级在接近奈奎斯特频率处平滑收尾，避免纹理混叠
@@ -190,37 +194,29 @@ void main() {
 const ASSEMBLE_FS = COMMON + /* glsl */`
 uniform sampler2D uFftA;
 uniform sampler2D uFftB;
-uniform sampler2D uPrevFoam;
 uniform int uN;
 uniform int uCascade;
 uniform float uLambda;       // 水平位移系数（1 = 拉格朗日真实值）
-uniform float uDt;
-uniform vec2 uFoam;          // x: 生成阈值（J 低于它开始起白浪），y: 生成增益
-uniform vec2 uFoamDecay;     // 活跃白浪、残留泡沫的衰减率（1/s）
 layout(location = 0) out vec4 outDisp;    // Dx, Dy, Dz, J
 layout(location = 1) out vec4 outSlope;   // sx, sz, sx², sz²
-layout(location = 2) out vec4 outFoam;    // 活跃白浪, 残留泡沫, J, 1
+layout(location = 2) out vec4 outDeriv;   // λDxx, λDzz, λDxz, J
 void main() {
   ivec2 q = ivec2(gl_FragCoord.xy);
   ivec2 p = ivec2(q.x, uCascade * uN + q.y);
   float sgn = ((q.x + q.y) & 1) == 1 ? -1.0 : 1.0;   // 频谱中心化带来的 (−1)^(x+z)
   vec4 A = texelFetch(uFftA, p, 0) * sgn;
   vec4 B = texelFetch(uFftB, p, 0) * sgn;
-  float jxx = 1.0 + uLambda * B.z;
-  float jzz = 1.0 + uLambda * B.w;
-  float jxz = uLambda * A.w;
-  float J = clamp(jxx * jzz - jxz * jxz, -8.0, 8.0);
+  vec3 d = clamp(uLambda * vec3(B.z, B.w, A.w), -8.0, 8.0);
+  float jxx = 1.0 + d.x;
+  float jzz = 1.0 + d.y;
+  float J = clamp(jxx * jzz - d.z * d.z, -8.0, 8.0);
   if (isnan(J)) J = 1.0;
   // 坡度限幅：坡度 > 1 已是破碎浪；不限幅时平方可能超出半精度上限变成 Inf，
   // 远处取高级 mip 时 Inf − Inf = NaN，地平线会出现黑线
   vec2 s = clamp(vec2(B.x / max(jxx, 0.2), B.y / max(jzz, 0.2)), -8.0, 8.0);
   outDisp = vec4(uLambda * A.x, A.z, uLambda * A.y, J);
   outSlope = vec4(s, s * s);
-  vec4 prev = texelFetch(uPrevFoam, q, 0);
-  float inject = clamp((uFoam.x - J) * uFoam.y, 0.0, 1.0);
-  float foamNew = max(prev.x * exp(-uDt * uFoamDecay.x), inject);          // 活跃白浪（"active" 是 GLSL 保留字）
-  float foamOld = max(prev.y * exp(-uDt * uFoamDecay.y), foamNew * 0.75);  // 残留泡沫
-  outFoam = vec4(foamNew, foamOld, J, 1.0);
+  outDeriv = vec4(d, J);
 }`;
 
 const READBACK_FS = COMMON + /* glsl */`
@@ -242,23 +238,15 @@ void main() {
   }
 }`;
 
-// 统计：取纹理最高一级 mip（整块平均）——泡沫覆盖率与各级均方坡度
-const FOAM_STATS_FS = COMMON + /* glsl */`
-uniform sampler2D uFoam0;
-uniform sampler2D uFoam1;
-uniform sampler2D uFoam2;
+// 统计：取纹理最高一级 mip（整块平均）——各级均方坡度
+const SLOPE_STATS_FS = COMMON + /* glsl */`
 uniform sampler2D uSlope0;
 uniform sampler2D uSlope1;
 uniform sampler2D uSlope2;
 out vec4 outColor;
 void main() {
-  if (gl_FragCoord.x < 1.0) {
-    vec4 a = textureLod(uFoam0, vec2(0.5), 20.0), b = textureLod(uFoam1, vec2(0.5), 20.0);
-    outColor = vec4(a.xy, b.xy);
-  } else {
-    vec4 s0 = textureLod(uSlope0, vec2(0.5), 20.0), s1 = textureLod(uSlope1, vec2(0.5), 20.0), s2 = textureLod(uSlope2, vec2(0.5), 20.0);
-    outColor = vec4(s0.z + s0.w, s1.z + s1.w, s2.z + s2.w, textureLod(uFoam2, vec2(0.5), 20.0).x);
-  }
+  vec4 s0 = textureLod(uSlope0, vec2(0.5), 20.0), s1 = textureLod(uSlope1, vec2(0.5), 20.0), s2 = textureLod(uSlope2, vec2(0.5), 20.0);
+  outColor = vec4(s0.z + s0.w, s1.z + s1.w, s2.z + s2.w, 1.0);
 }`;
 
 // ---------------------------------------------------------------- helpers
@@ -295,7 +283,7 @@ function rawMaterial(fragmentShader, uniforms) {
  *
  *   const sim = new OceanSimulation(renderer, { size: 256 });
  *   sim.update(dt, seaModel.spectrumParams());      // 每帧
- *   sim.cascades[i].displacement / .slope / .foam   // 供海面着色器采样
+ *   sim.cascades[i].displacement / .slope / .deriv  // 供海面着色器、白浪场采样
  *   sim.heightAt(x, z)                               // CPU 采样（异步回读，延迟 1–2 帧）
  */
 export class OceanSimulation {
@@ -344,11 +332,9 @@ export class OceanSimulation {
 
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     this.cascades = cascades.map((L, i) => {
-      const mk = () => makeTarget(N, N, { count: 3, type: outputType, mip: true, wrap: THREE.RepeatWrapping, anisotropy: Math.min(8, maxAniso) });
-      return { index: i, L, band: this.bands[i], targets: [mk(), mk()], current: 0,
-        get displacement() { return this.targets[this.current].textures[0]; },
-        get slope() { return this.targets[this.current].textures[1]; },
-        get foam() { return this.targets[this.current].textures[2]; } };
+      const target = makeTarget(N, N, { count: 3, type: outputType, mip: true, wrap: THREE.RepeatWrapping, anisotropy: Math.min(8, maxAniso) });
+      return { index: i, L, band: this.bands[i], target,
+        displacement: target.textures[0], slope: target.textures[1], deriv: target.textures[2] };
     });
 
     // 全屏四边形
@@ -374,9 +360,7 @@ export class OceanSimulation {
       uInA: { value: null }, uInB: { value: null }, uN: { value: N }, uSub: { value: 2 }, uHorizontal: { value: 1 },
     });
     this.assembleMat = rawMaterial(ASSEMBLE_FS, {
-      uFftA: { value: null }, uFftB: { value: null }, uPrevFoam: { value: null }, uN: { value: N }, uCascade: { value: 0 },
-      uLambda: { value: choppiness }, uDt: { value: 0 }, uFoam: { value: new THREE.Vector2(0.35, 3) },
-      uFoamDecay: { value: new THREE.Vector2(0.9, 0.18) },
+      uFftA: { value: null }, uFftB: { value: null }, uN: { value: N }, uCascade: { value: 0 }, uLambda: { value: choppiness },
     });
 
     // 回读
@@ -387,46 +371,42 @@ export class OceanSimulation {
       this.readbackMat = rawMaterial(READBACK_FS, {
         uDisp0: { value: null }, uDisp1: { value: null }, uM0: { value: m0 }, uM1: { value: m1 }, uN: { value: N },
       });
-      this._rbBuffers = [new Float32Array(Math.max(m0, m1) * (m0 + m1) * 4), new Float32Array(Math.max(m0, m1) * (m0 + m1) * 4)];
+      const n = Math.max(m0, m1) * (m0 + m1) * 4;
+      // 三个缓冲轮换：正在读、最近一次、上一次（两次回读之差 / 时间差 = 水质点速度）
+      this._rbBuffers = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
       this._rbReady = null;       // 最近一次完成的回读
+      this._rbPrev = null;        // 上一次
       this._rbPending = false;
       this._rbTime = 0;
+      this._rbPrevTime = 0;
+      this._rbGen = 0;
     }
     this.cascadeWeights = [1, 1, 1];   // CPU 采样时与着色器一致的级联权重
-    this.foamWeight2 = 0;              // 最细一级计入白浪的权重（年轻风浪的主浪落在这一级时为 1）
-    this.measured = { Hs: 0, samples: 0, foamActive: 0, foamResidual: 0, foamSamples: 0 };
-    this.foamStatsTarget = makeTarget(2, 1, { type: THREE.FloatType });
-    this.foamStatsMat = rawMaterial(FOAM_STATS_FS, {
-      uFoam0: { value: null }, uFoam1: { value: null }, uFoam2: { value: null }, uSlope0: { value: null }, uSlope1: { value: null }, uSlope2: { value: null },
-    });
-    this._foamBuf = new Float32Array(8);
-    this._foamPending = false;
+    this.measured = { Hs: 0, samples: 0, mss: 0, mssCascades: null, statsSamples: 0 };
+    this.statsTarget = makeTarget(1, 1, { type: THREE.FloatType });
+    this.statsMat = rawMaterial(SLOPE_STATS_FS, { uSlope0: { value: null }, uSlope1: { value: null }, uSlope2: { value: null } });
+    this._statsBuf = new Float32Array(4);
+    this._statsPending = false;
   }
 
-  /** 异步测量白浪覆盖（两级活跃白浪平均值之和），结果写入 measured.foamActive */
-  measureFoam() {
-    if (this._foamPending || !this.supportsFloat) return;
+  /** 异步测量各级均方坡度（写入 measured.mssCascades / mss），供粗糙度补足 Cox–Munk 与白浪阈值初值 */
+  measureSlopes() {
+    if (this._statsPending || !this.supportsFloat) return;
     const r = this.renderer, prev = r.getRenderTarget();
-    const fu = this.foamStatsMat.uniforms;
-    fu.uFoam0.value = this.cascades[0].foam;
-    fu.uFoam1.value = this.cascades[1].foam;
-    fu.uFoam2.value = this.cascades[2].foam;
-    fu.uSlope0.value = this.cascades[0].slope;
-    fu.uSlope1.value = this.cascades[1].slope;
-    fu.uSlope2.value = this.cascades[2].slope;
-    this._pass(this.foamStatsMat, this.foamStatsTarget);
-    this._foamPending = true;
-    r.readRenderTargetPixelsAsync(this.foamStatsTarget, 0, 0, 2, 1, this._foamBuf)
+    const su = this.statsMat.uniforms;
+    su.uSlope0.value = this.cascades[0].slope;
+    su.uSlope1.value = this.cascades[1].slope;
+    su.uSlope2.value = this.cascades[2].slope;
+    this._pass(this.statsMat, this.statsTarget);
+    this._statsPending = true;
+    r.readRenderTargetPixelsAsync(this.statsTarget, 0, 0, 1, 1, this._statsBuf)
       .then((b) => {
-        this.measured.foamCascades = [b[0], b[2], b[7]];  // 各级活跃白浪平均值
-        this.measured.foamActive = b[0] + b[2] + this.foamWeight2 * b[7];
-        this.measured.foamResidual = Math.max(b[1], b[3]);
-        this.measured.mssCascades = [b[4], b[5], b[6]];
-        this.measured.mss = b[4] + b[5] + b[6];          // 已解析波段的均方坡度
-        this.measured.foamSamples++;
+        this.measured.mssCascades = [b[0], b[1], b[2]];
+        this.measured.mss = b[0] + b[1] + b[2];          // 已解析波段的均方坡度
+        this.measured.statsSamples++;
       })
       .catch(() => {})
-      .finally(() => { this._foamPending = false; });
+      .finally(() => { this._statsPending = false; });
     const gl = r.getContext();
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     r.setRenderTarget(prev);
@@ -448,13 +428,6 @@ export class OceanSimulation {
       else { u.uSwell.value[i].set(0, 1, 0, 1); u.uSwellS.value[i] = 10; }
     }
     u.uSwellCount.value = n;
-  }
-
-  /** 白浪生成：threshold 为 J 阈值（越大越容易起白浪），gain 为生成强度 */
-  setFoam(threshold, gain = 3, decayActive = 0.9, decayResidual = 0.18) {
-    const u = this.assembleMat.uniforms;
-    u.uFoam.value.set(threshold, gain);
-    u.uFoamDecay.value.set(decayActive, decayResidual);
   }
 
   _pass(material, target) {
@@ -494,18 +467,14 @@ export class OceanSimulation {
       }
     }
 
-    // 4. 组装三级输出（泡沫读取上一帧）
+    // 4. 组装三级输出
     const au = this.assembleMat.uniforms;
     au.uFftA.value = this.fftTargets[src].textures[0];
     au.uFftB.value = this.fftTargets[src].textures[1];
-    au.uDt.value = dt;
     au.uLambda.value = this.choppiness;
     for (const c of this.cascades) {
-      const prev = c.targets[c.current], next = c.targets[1 - c.current];
       au.uCascade.value = c.index;
-      au.uPrevFoam.value = prev.textures[2];
-      this._pass(this.assembleMat, next);
-      c.current = 1 - c.current;
+      this._pass(this.assembleMat, c.target);
     }
 
     // 5. 回读（上一次完成后才发起下一次）
@@ -515,13 +484,13 @@ export class OceanSimulation {
       ru.uDisp1.value = this.cascades[1].displacement;
       this._pass(this.readbackMat, this.readbackTarget);
       this._rbPending = true;
-      const buf = this._rbBuffers[0];
-      const t = this.time;
+      const buf = this._rbBuffers.find((b) => b !== this._rbReady && b !== this._rbPrev);
+      const t = this.time, gen = this._rbGen;
       r.readRenderTargetPixelsAsync(this.readbackTarget, 0, 0, this.readbackTarget.width, this.readbackTarget.height, buf)
         .then(() => {
-          this._rbBuffers.reverse();
-          this._rbReady = this._rbBuffers[1];
-          this._rbTime = t;
+          if (gen !== this._rbGen) return;       // 发起之后海况被重置过：这份数据作废
+          this._rbPrev = this._rbReady; this._rbPrevTime = this._rbTime;
+          this._rbReady = buf; this._rbTime = t;
           this._measure();
         })
         .catch(() => {})
@@ -554,9 +523,8 @@ export class OceanSimulation {
   get ready() { return !!this._rbReady; }
 
   /** CPU 采样：未位移水平位置 x0 处的位移（级联 0、1 之和），写入 out = {x, y, z} */
-  displacementAt(x0, z0, out = { x: 0, y: 0, z: 0 }) {
+  displacementAt(x0, z0, out = { x: 0, y: 0, z: 0 }, d = this._rbReady) {
     out.x = 0; out.y = 0; out.z = 0;
-    const d = this._rbReady;
     if (!d) return out;
     const [m0, m1] = this.readbackSizes, W = this.readbackTarget.width;
     const layers = [[0, m0, this.lengths[0], this.cascadeWeights[0]], [m0, m1, this.lengths[1], this.cascadeWeights[1]]];
@@ -576,15 +544,47 @@ export class OceanSimulation {
     return out;
   }
 
-  /** CPU 采样：世界坐标 (x, z) 处的水面高度（反解水平位移，3 次不动点迭代） */
-  heightAt(x, z) {
+  /** 世界坐标 (x, z) 处的水面点对应的未位移参考位置 x0（反解水平位移，4 次不动点迭代） */
+  referenceAt(x, z, out = { x: 0, z: 0 }) {
     const o = this._tmp || (this._tmp = { x: 0, y: 0, z: 0 });
     let x0 = x, z0 = z;
     for (let i = 0; i < 4; i++) {
       this.displacementAt(x0, z0, o);
       x0 = x - o.x; z0 = z - o.z;
     }
-    return this.displacementAt(x0, z0, o).y;
+    out.x = x0; out.z = z0;
+    return out;
+  }
+
+  /** CPU 采样：世界坐标 (x, z) 处的水面高度 */
+  heightAt(x, z) {
+    const r = this.referenceAt(x, z, this._ref || (this._ref = { x: 0, z: 0 }));
+    return this.displacementAt(r.x, r.z, this._tmp).y;
+  }
+
+  /**
+   * CPU 采样：参考位置 x0 处水质点的速度（m/s）= 位移对时间的导数。
+   * 位移按拉格朗日参考点存储，所以两次回读之差就是质点的轨道速度（不含最细一级）。
+   */
+  /**
+   * 海况突变（切镜头、从零起浪、直接充分发展）后调用：丢掉旧的回读。
+   * 否则新旧两个海面的位移之差会被当成水质点速度（几十 m/s），把船打转。
+   */
+  invalidateReadback() {
+    this._rbGen = (this._rbGen || 0) + 1;
+    this._rbReady = null; this._rbPrev = null;
+    this._rbTime = 0; this._rbPrevTime = 0;
+  }
+
+  velocityAt(x0, z0, out = { x: 0, y: 0, z: 0 }) {
+    out.x = 0; out.y = 0; out.z = 0;
+    const dt = this._rbTime - this._rbPrevTime;
+    // 两份回读相隔太久（卡顿、后台标签页）时差分不再代表瞬时速度
+    if (!this._rbPrev || !(dt > 1e-4) || dt > 0.5) return out;
+    const a = this.displacementAt(x0, z0, this._va || (this._va = { x: 0, y: 0, z: 0 }), this._rbReady);
+    const b = this.displacementAt(x0, z0, this._vb || (this._vb = { x: 0, y: 0, z: 0 }), this._rbPrev);
+    out.x = (a.x - b.x) / dt; out.y = (a.y - b.y) / dt; out.z = (a.z - b.z) / dt;
+    return out;
   }
 
   /** 调试/测试：直接上传 h0（Float32Array，N×3N×4：h0(k).re, im, h0(−k).re, im） */
@@ -597,9 +597,9 @@ export class OceanSimulation {
   }
 
   dispose() {
-    for (const t of [this.spectrumTarget, ...this.fftTargets, this.readbackTarget, this.foamStatsTarget]) t?.dispose();
-    for (const c of this.cascades) c.targets.forEach((t) => t.dispose());
-    for (const m of [this.spectrumMat, this.evolveMat, this.fftMat, this.assembleMat, this.readbackMat, this.foamStatsMat]) m?.dispose();
+    for (const t of [this.spectrumTarget, ...this.fftTargets, this.readbackTarget, this.statsTarget]) t?.dispose();
+    for (const c of this.cascades) c.target.dispose();
+    for (const m of [this.spectrumMat, this.evolveMat, this.fftMat, this.assembleMat, this.readbackMat, this.statsMat]) m?.dispose();
     this.noiseTexture.dispose();
     this._debugH0?.dispose();
     this.quad.geometry.dispose();

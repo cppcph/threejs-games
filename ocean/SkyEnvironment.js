@@ -301,7 +301,7 @@ export class SkyEnvironment {
         float hg(float mu, float g){ float g2 = g * g; return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * mu, 1.5); }
         void main(){
           vec3 d = normalize(vDir);
-          if (d.y < 0.004) discard;
+          if (d.y < 0.004 * (1.0 - uStorm)) discard;
           // —— 积云层 ——
           float t = 1500.0 / (d.y + 0.035);                 // 到云底平面的距离（近地平线压平）
           vec2 p = d.xz * t / 14000.0 + uOfs;                // 1 个噪声周期 = 14 km
@@ -347,7 +347,8 @@ export class SkyEnvironment {
           // 大气透视：越远越接近地平线颜色、越透明
           float haze = 1.0 - exp(-t / 52000.0);
           outc = mix(outc, uHorizon, haze * 0.8);
-          outa *= (1.0 - haze * 0.55) * smoothstep(0.004, 0.06, d.y);
+          // 全阴的风暴天云层一直盖到地平线（CIE 全阴天空：地平线亮度只有天顶的 1/3），不露出后面的亮天
+          outa *= (1.0 - haze * 0.55 * (1.0 - uStorm)) * mix(smoothstep(0.004, 0.06, d.y), 1.0, uStorm);
           if (outa < 0.003) discard;
           gl_FragColor = vec4(min(outc, vec3(40.0)), outa);
         }`,
@@ -520,9 +521,10 @@ export class SkyEnvironment {
     const moonForClouds = this.moonColor.clone().multiplyScalar(1.6);
     if (useMoon) { cu.uLightDir.value.copy(this.moonDirection); cu.uLightColor.value.copy(moonForClouds).add(cloudSun.multiplyScalar(0.9)); }
     else { cu.uLightDir.value.copy(this.sunDirection); if (cu.uLightDir.value.y < 0.01) { cu.uLightDir.value.y = 0.01; cu.uLightDir.value.normalize(); } cu.uLightColor.value.copy(cloudSun); }
-    // 风暴时云层上方的晴空光照不到云底：环境光整体压暗，薄处也只是浅灰
-    cu.uAmbTop.value.copy(this.skyAmbient).multiplyScalar(lerp(1.05, 0.38, st));
-    cu.uAmbBottom.value.copy(this.skyAmbient).multiplyScalar(lerp(0.32, 0.16, st)).lerp(_c.setRGB(0.05, 0.055, 0.06), st * 0.4);
+    // 风暴时云层上方的晴空光照不到云底：环境光整体压暗；但全阴天的云底仍是天顶最亮、地平线最暗
+    // （CIE 全阴天空），不能让地平线的亮带比头顶亮 —— 否则海面掠射反光比泡沫还亮，白浪看不见
+    cu.uAmbTop.value.copy(this.skyAmbient).multiplyScalar(lerp(1.05, 0.62, st));
+    cu.uAmbBottom.value.copy(this.skyAmbient).multiplyScalar(lerp(0.32, 0.3, st)).lerp(_c.setRGB(0.05, 0.055, 0.06), st * 0.15);
     cu.uHorizon.value.copy(this.skyHorizon).multiplyScalar(1 - 0.45 * st);
     cu.uLo.value = this._lo; cu.uW.value = this._w; cu.uStorm.value = st;
     cu.uCirrus.value = smoothstep(0.05, 0.35, this.cloudCover) * (1 - smoothstep(0.7, 0.95, this.cloudCover));

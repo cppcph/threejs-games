@@ -6,13 +6,27 @@ function rng(seed) {
   return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
+/** 按秩均衡：把数组映射成 [0,1] 上的均匀分布（保持大小顺序） */
+function equalize(a) {
+  const n = a.length, idx = new Uint32Array(n);
+  for (let i = 0; i < n; i++) idx[i] = i;
+  idx.sort((i, j) => a[i] - a[j]);
+  const out = new Float32Array(n);
+  for (let r = 0; r < n; r++) out[idx[r]] = r / (n - 1);
+  return out;
+}
+
 /**
- * 泡沫纹理（RGBA8，可平铺）
- *   R：气泡团（Worley 细胞边缘 + 细胞内小气泡），G：稀疏的大块泡沫斑，B：细碎纹理，A：低频起伏
+ * 泡沫纹理（RGBA8，可平铺）。R、G、B 三个通道都按秩均衡成 [0,1] 均匀分布：
+ * 着色器用“图案值 > 1 − f”画出面积比例为 f 的泡沫，画面上的覆盖率就严格等于模拟给出的 f。
+ *   R：残留泡沫的网状花边（Worley 细胞边缘 = 泡沫丝，细胞内零星小气泡，细胞中心是空洞）
+ *   G：活跃白浪的团块（大细胞 + 小细胞叠加，边缘起泡）
+ *   B：细碎气泡（亮度起伏、细节层）
+ *   A：低频起伏
  */
 export function makeFoamTexture(size = 256, seed = 7) {
   const rand = rng(seed);
-  const data = new Uint8Array(size * size * 4);
+  const n = size * size;
   const cells = (count) => Array.from({ length: count }, () => [rand(), rand(), 0.4 + rand() * 0.6]);
   const layers = [cells(90), cells(26), cells(400)];
   const worley = (pts, u, v) => {
@@ -26,18 +40,26 @@ export function makeFoamTexture(size = 256, seed = 7) {
     return [f1, f2, w];
   };
   const lowFreq = (u, v) => 0.5 + 0.25 * Math.sin(2 * Math.PI * (u * 2 + v)) * Math.cos(2 * Math.PI * (v * 3 - u)) + 0.25 * Math.sin(2 * Math.PI * (u * 5 + v * 4) + 1.3);
+  const R = new Float32Array(n), Gc = new Float32Array(n), B = new Float32Array(n), A = new Float32Array(n);
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-    const u = x / size, v = y / size;
+    const u = x / size, v = y / size, i = y * size + x;
     const [a1, a2, aw] = worley(layers[0], u, v);
     const [b1, b2] = worley(layers[1], u, v);
     const [c1, c2] = worley(layers[2], u, v);
     const edge = 1 - Math.min(1, (a2 - a1) * 14);                // 细胞边界 → 泡沫丝
-    const bubble = Math.max(0, 1 - a1 * 26 * aw) * 0.6;          // 细胞中心小气泡
-    const r = Math.min(1, edge * 0.85 + bubble + 0.15 * (1 - Math.min(1, (c2 - c1) * 30)));
-    const g = Math.min(1, Math.max(0, 1 - b1 * 5.5) * 1.3 + (1 - Math.min(1, (b2 - b1) * 6)) * 0.4);
-    const b = 1 - Math.min(1, (c2 - c1) * 22);
-    const o = (y * size + x) * 4;
-    data[o] = r * 255; data[o + 1] = g * 255; data[o + 2] = b * 255; data[o + 3] = lowFreq(u, v) * 255;
+    const bubble = Math.max(0, 1 - a1 * 26 * aw) * 0.45;         // 细胞内小气泡
+    const fine = 1 - Math.min(1, (c2 - c1) * 22);
+    // 微小抖动打破平台值，均衡后才是严格均匀
+    R[i] = edge * 0.85 + bubble + 0.15 * fine + rand() * 1e-3;
+    Gc[i] = Math.max(0, 1 - b1 * 5.5) * 1.2 + (1 - Math.min(1, (b2 - b1) * 6)) * 0.35 + fine * 0.3 + rand() * 1e-3;
+    B[i] = fine + rand() * 1e-3;
+    A[i] = lowFreq(u, v);
+  }
+  const er = equalize(R), eg = equalize(Gc), eb = equalize(B);
+  const data = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    data[i * 4] = Math.round(er[i] * 255); data[i * 4 + 1] = Math.round(eg[i] * 255);
+    data[i * 4 + 2] = Math.round(eb[i] * 255); data[i * 4 + 3] = Math.round(A[i] * 255);
   }
   const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;

@@ -12,7 +12,7 @@
 // 用法：
 //   const wake = new WakeMap(renderer, { resolution: 512, worldSize: 256 });
 //   const hullWake = wake.createHullEmitter({ beam: 2.75, length: 8.6 });
-//   每帧（在 wake.update 之前）：hullWake.update(dt, { x, z, forwardX, forwardZ, speed });
+//   每帧（在 wake.update 之前）：hullWake.update(dt, { x, z, forwardX, forwardZ, speed, angle?, strength? });
 //   wake.update(dt, boatX, boatZ);
 //   海面着色器：vec2 uv = (p.xz - rect.xy) / rect.zw; 只在 0 ≤ uv ≤ 1 时取 texture(uWake, uv)
 //   （rect = wake.rect：minX, minZ, sizeX, sizeZ；纹理 u 对应 +x，v 对应 +z）
@@ -149,12 +149,14 @@ class HullWakeEmitter {
   }
   reset() { this.parts.length = 0; this._emit = 0; this._prevSx = this._prevSz = null; }
   // x, z：船中心（水线）；forwardX/forwardZ：船首方向（会归一化）；speed：对水速度 m/s
-  update(dt, { x, z, forwardX, forwardZ, speed = 0 }) {
+  // angle：尾迹半角（默认开尔文角 19.47°；高傅汝德数时变窄，Rabaud & Moisy 2013）；strength：兴波强度 0–1（默认按航速）
+  update(dt, { x, z, forwardX, forwardZ, speed = 0, angle = Math.asin(1 / 3), strength = null }) {
     const w = this.wake;
     if (!(dt > 0)) return;
     let fl = Math.hypot(forwardX, forwardZ) || 1; const fx = forwardX / fl, fz = forwardZ / fl;
     const rx = -fz, rz = fx;                                         // 船舷方向（垂直于航向）
-    const spd = Math.max(0, speed), sf = clamp(spd / 6, 0, 1.3) * this.intensity;
+    const spd = Math.max(0, speed), sf = (strength === null ? clamp(spd / 6, 0, 1.3) : clamp(strength, 0, 1.3)) * this.intensity;
+    const spread = Math.tan(angle);                                  // 波臂横向散开速度 / 航速
     const L2 = this.length / 2, B = this.beam;
     const sx = x - fx * (L2 - 0.3), sz = z - fz * (L2 - 0.3), bx = x + fx * (L2 - 0.4), bz = z + fz * (L2 - 0.4);
     // 船尾湍流：沿上一帧→这一帧的船尾线段盖一个拉长的章；按覆盖率缩放，帧率高低累积量一样
@@ -169,11 +171,11 @@ class HullWakeEmitter {
     // 船首浪与船舷：速率型（× dt）
     w.stamp(bx, bz, 1.2, 1.2, 0, 0.45 * sf * dt, 1.3 * sf * dt);
     for (const s of [-1, 1]) w.stamp(x + rx * s * B * 0.5, z + rz * s * B * 0.5, 2.2, 0.6, Math.atan2(fz, fx), 0.2 * sf * dt, 0.8 * sf * dt);
-    // 开尔文波臂：船首两侧发射、以 0.354·v 横向散开的粒子
+    // 开尔文波臂：船首两侧发射、以 tan(半角)·v 横向散开的粒子（开尔文角时为 0.354·v）
     this._emit += dt * 22 * Math.min(1, spd / 2);
     while (this._emit > 1) {
       this._emit -= 1;
-      for (const s of [-1, 1]) this.parts.push({ x: bx + rx * s * 0.4, z: bz + rz * s * 0.4, vx: rx * s * 0.354 * spd, vz: rz * s * 0.354 * spd, age: 0, k: sf });
+      for (const s of [-1, 1]) this.parts.push({ x: bx + rx * s * 0.4, z: bz + rz * s * 0.4, vx: rx * s * spread * spd, vz: rz * s * spread * spd, age: 0, k: sf });
     }
     if (this.parts.length > this.maxParticles) this.parts.splice(0, this.parts.length - this.maxParticles);
     for (let i = this.parts.length - 1; i >= 0; i--) {
