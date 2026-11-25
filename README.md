@@ -4,6 +4,44 @@
 
 品类参考了 GitHub 上 Claude 游戏合集里最受欢迎的几款（见文末“来源”）。玩法是同一类，名字、角色、美术和关卡都是原创。
 
+另有一个可复用的海面模块 [ocean/](ocean/README.md) 和它的电影级演示 [风生浪 Windsea](examples/ocean/)。
+
+## 海面模块 ocean/ 与演示「风生浪」
+
+![风生浪：黎明逆光](docs/screenshots/windsea-dawn.jpg)
+
+风是唯一的源头：风速、风向、风区、持续时间 → 按海洋学经验规律起浪、积累、转为涌浪 → GPU FFT 合成海面 → 电影级着色。
+
+- **物理**：
+  - JONSWAP 风区与风时生长律，Pierson–Moskowitz 充分发展上限，等效风时法处理变风；
+  - 风减弱或转向时，旧浪转为涌浪并衰减；
+  - 浅水用 Young & Verhagen 生长律和 TMA 谱；
+  - Donelan 谱形与随波龄变化的方向分布；
+  - 白浪覆盖率按 Monahan 公式自动校准，太阳闪光带宽度按 Cox–Munk 观测。
+- **验证**：
+  - 16 项物理单元测试；
+  - GPU FFT 与 CPU 逐点 DFT 对照；
+  - 理论 Hs 与模拟海面实测 Hs 在 ±4% 内吻合（含浅水和涌浪）。
+- **着色**：
+  - 用坡度方差算粗糙度（LEAN），远处不闪；
+  - 精确 Fresnel 加环境反射能量项；
+  - 浪尖透光，白浪会被短波打散，8 级以上出现沿风向的泡沫条纹；
+  - 阵风在海面上吹出随风移动的暗斑（猫爪风），海天无缝过渡。
+- **演示**：
+  - 6 个镜头：黄昏、风暴、晴空、月夜、黎明，以及“起浪”（从平静开始，看浪按生长律积累）；
+  - 5 种机位，其中贴海面机位会随浪起伏；
+  - 物理面板可调风速、风向、风区、水深、时间加速和远方涌浪，读数并列理论值与模拟实测值，附 Hs 生长曲线。
+
+| 黄昏 | 风暴 |
+|---|---|
+| ![黄昏](docs/screenshots/windsea-golden.jpg) | ![风暴](docs/screenshots/windsea-storm.jpg) |
+| **晴空** | **起浪：风刚吹起的年轻海面** |
+| ![晴空](docs/screenshots/windsea-tropical.jpg) | ![起浪](docs/screenshots/windsea-growth.jpg) |
+
+模块说明、公式、API、性能分档和踩过的坑都在 [ocean/README.md](ocean/README.md)。《信风》游戏里仍是早先的 Gerstner 海面（见 [WATER.md](games/windpost/WATER.md)），新模块是它的升级版。
+
+## 四款游戏
+
 | 游戏 | 类型 | 一句话 |
 |---|---|---|
 | [信风 Windpost](games/windpost/) | 海上帆船 · 水体渲染 | 驾单桅邮船在热带群岛之间送信，从午后航行到星夜 |
@@ -77,13 +115,17 @@ python3 -m http.server 8000
 ## 目录
 
 ```
-index.html                  游戏列表首页
+index.html                  首页
+ocean/                      可复用海面模块（说明见 ocean/README.md）
+examples/ocean/             海面演示「风生浪」
 games/<名字>/index.html     各游戏，单文件
-games/windpost/WATER.md     水体与船只渲染说明
+games/windpost/WATER.md     《信风》的 Gerstner 水体说明
 docs/screenshots/           截图
-tools/play.cjs              无头浏览器试玩、截图
+tools/play.cjs              无头浏览器试玩、截图（--root 可加载仓库里的 ES 模块）
 tools/artifact.cjs          独立网页 ↔ claude.ai Artifact 片段互转
-tests/smoke.cjs             冒烟测试（加载 → 开始 → 操作 → 截图）
+tools/build-ocean-demo.mjs  把海面演示打包成单文件 Artifact（需要 esbuild）
+tests/smoke.cjs             游戏冒烟测试（加载 → 开始 → 操作 → 截图）
+tests/ocean/                海面模块测试：物理单元测试、GPU FFT 校验、Hs 一致性、看图页
 ```
 
 ## 测试
@@ -97,6 +139,15 @@ node tools/play.cjs games/windpost/index.html out/windpost tests/smoke.cjs
 ```
 
 `npm install` 之后，测试会用本地的 three.js 代替 CDN，断网也能跑。没有显卡的机器上 Chromium 用软件渲染，几帧每秒，只适合验证流程。
+
+海面模块：
+
+```bash
+node --test tests/ocean/windsea.test.mjs
+node tools/play.cjs tests/ocean/fft-check.html out/fft tests/ocean/fft-check.cjs --root=.
+```
+
+第一条是风浪物理的单元测试（纯 Node）；第二条在浏览器里把 GPU FFT 与 CPU 逐点 DFT 对照。`tests/ocean/spectrum-check.html` 对照理论 Hs 与模拟实测 Hs。
 
 ## 发布到 claude.ai
 

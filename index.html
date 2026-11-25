@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Three.js 小游戏四款</title>
-<meta name="description" content="四款纯代码生成的 Three.js 浏览器游戏：海上帆船、城市车流驾驶、魂类 Boss 战、月夜潜行。">
+<title>Three.js 海面与小游戏</title>
+<meta name="description" content="风与浪物理一致的 Three.js 海面模块与电影级演示，外加四款纯代码生成的浏览器游戏。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;900&display=swap">
@@ -36,7 +36,7 @@
   header { display: grid; gap: 8px; }
   h1 { font: 900 clamp(30px, 5vw, 46px)/1.15 var(--display); margin: 0; letter-spacing: .02em; text-wrap: balance; }
   header p { margin: 0; color: var(--muted); max-width: 62ch; }
-  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
   .card {
     display: grid; grid-template-rows: auto 1fr; min-width: 0;
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
@@ -76,23 +76,32 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Three.js 小游戏四款</h1>
-    <p>每款一个 HTML 文件，模型、贴图、音效和音乐全部由代码生成。键盘和手机触屏都能玩。</p>
+    <h1>Three.js 海面与小游戏</h1>
+    <p>一个风与浪物理一致的海面模块，外加四款游戏。全部由代码生成，没有模型、贴图和音频文件。</p>
   </header>
 
   <main class="grid">
     <article class="card hero">
-      <a href="games/windpost/" aria-label="开始信风"><img src="docs/screenshots/windpost-sunset.jpg" alt="日落时的海面与单桅邮船" width="1280" height="720"></a>
+      <a href="examples/ocean/" aria-label="打开风生浪"><img src="docs/screenshots/windsea-dawn.jpg" alt="黎明逆光下的帆船与海面闪光带" width="1280" height="720"></a>
       <div class="body">
-        <span class="kind">海上帆船 · 水体渲染</span>
-        <h2 class="name">信风<small>WINDPOST</small></h2>
-        <p>驾单桅邮船在热带群岛之间送信，从午后航行到星夜。Gerstner 海面、天空倒影、浅滩与泡沫、夜光尾迹，按 T 打开渲染调参面板。</p>
+        <span class="kind">海面模块 · 电影级演示</span>
+        <h2 class="name">风生浪<small>WINDSEA</small></h2>
+        <p>风速、风区、持续时间按海洋学规律起浪、积累、转为涌浪，GPU FFT 合成海面。白浪多少按 Monahan 公式，闪光带宽窄按 Cox–Munk 观测。六个镜头，物理面板并列理论值与模拟实测值。</p>
         <div class="links">
-          <a href="games/windpost/">启航</a>
-          <a class="ghost" href="https://github.com/cppcph/threejs-games/blob/main/games/windpost/WATER.md">水体渲染说明</a>
+          <a href="examples/ocean/">打开演示</a>
+          <a class="ghost" href="https://github.com/cppcph/threejs-games/blob/main/ocean/README.md">模块说明</a>
         </div>
       </div>
     </article>
+
+    <a class="card" href="games/windpost/">
+      <img src="docs/screenshots/windpost-sunset.jpg" alt="日落时的海面与单桅邮船" width="1280" height="720" loading="lazy">
+      <div class="body">
+        <span class="kind">海上帆船</span>
+        <h2 class="name">信风<small>WINDPOST</small></h2>
+        <p>驾单桅邮船在热带群岛之间送信，从午后航行到星夜。按 T 打开渲染调参面板。</p>
+      </div>
+    </a>
 
     <a class="card" href="games/neon-noodle/">
       <img src="docs/screenshots/neon-noodle-ride.jpg" alt="雨夜霓虹街道上骑电驴穿过车流" width="1280" height="720" loading="lazy">

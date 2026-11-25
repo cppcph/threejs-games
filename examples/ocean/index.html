@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body>
+<!-- ARTIFACT:BEGIN -->
+<title>风生浪 Windsea</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;900&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* 布局：全屏海面；左上角标题与海况一句话；右侧可收起的物理/画面面板；底部镜头与机位条 */
+:root {
+  color-scheme: dark;
+  --ink: #ecebe6;
+  --muted: #a4adb4;
+  --faint: #6e7880;
+  --panel: rgba(9, 14, 19, 0.74);
+  --line: rgba(236, 235, 230, 0.14);
+  --accent: #e8b46a;
+  --sea: #6fc6c0;
+  --warn: #e77a5f;
+  --ground: #06090c;
+  --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--sans); }
+canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+button, select, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.hud { position: fixed; inset: 0; pointer-events: none; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.hud > * { pointer-events: auto; }
+.brand { position: absolute; top: calc(14px + env(safe-area-inset-top, 0px)); left: max(16px, env(safe-area-inset-left, 0px)); max-width: min(560px, calc(100% - 32px)); text-shadow: 0 1px 12px rgba(0,0,0,.45); }
+.brand h1 { margin: 0; font: 900 30px/1.1 var(--serif); letter-spacing: .06em; }
+.brand h1 small { font: 500 11px var(--sans); letter-spacing: .3em; color: var(--muted); margin-left: 10px; vertical-align: middle; }
+.status { margin-top: 6px; font-size: 13px; color: var(--ink); opacity: .92; }
+.status b { color: var(--accent); font-weight: 500; }
+.status .dim { color: var(--muted); }
+
+.panel { position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); width: 336px; max-height: calc(100% - 120px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); padding: 12px 14px 14px; scrollbar-width: thin; }
+.tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.tabs button { flex: 1; background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 5px 0; color: var(--muted); }
+.tabs button[aria-selected="true"] { color: var(--ground); background: var(--accent); border-color: var(--accent); font-weight: 500; }
+.panel h3 { margin: 14px 0 6px; font: 600 12px var(--sans); letter-spacing: .14em; color: var(--muted); }
+.row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 86px; align-items: center; gap: 8px; margin: 5px 0; }
+.row label { color: var(--muted); font-size: 13px; }
+.row output { font: 12px var(--mono); text-align: right; color: var(--ink); white-space: nowrap; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+select { width: 100%; background: rgba(255,255,255,.06); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.btns { display: flex; gap: 8px; margin: 10px 0 2px; flex-wrap: wrap; }
+.btns button, .chip { background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; }
+.btns button:hover, .chip:hover { border-color: var(--accent); }
+.check { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 8px 0; }
+dl.read { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 4px 0 8px; font-size: 12.5px; }
+dl.read dt { color: var(--muted); }
+dl.read dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; }
+dl.read dd .ok { color: var(--sea); }
+.spark { width: 100%; height: 78px; display: block; border-top: 1px solid var(--line); margin-top: 6px; }
+.note { color: var(--faint); font-size: 11.5px; line-height: 1.55; margin: 6px 0 0; }
+
+.dock { position: absolute; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(14px + env(safe-area-inset-bottom, 0px)); display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; justify-content: space-between; }
+.group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 6px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.group .lbl { font-size: 11px; letter-spacing: .2em; color: var(--faint); padding: 0 6px; }
+.group button { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 6px 11px; color: var(--muted); }
+.group button[aria-pressed="true"] { color: var(--ink); border-color: var(--accent); background: rgba(232,180,106,.12); }
+.group button:hover { color: var(--ink); }
+
+.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--ground); color: var(--muted); font: 500 15px var(--sans); letter-spacing: .2em; transition: opacity .8s; z-index: 5; }
+.loading.done { opacity: 0; pointer-events: none; }
+.error { max-width: 460px; padding: 0 16px; text-align: center; letter-spacing: 0; line-height: 1.7; color: var(--ink); }
+body.clean .hud { display: none; }
+.toast { position: fixed; left: 50%; top: calc(18px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line); padding: 6px 14px; border-radius: 999px; font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 4; }
+.toast.on { opacity: 1; }
+
+@media (max-width: 760px) {
+  .brand h1 { font-size: 24px; }
+  .brand h1 small { display: none; }
+  .status { font-size: 12px; }
+  .panel { top: auto; bottom: calc(118px + env(safe-area-inset-bottom, 0px)); left: max(12px, env(safe-area-inset-left, 0px)); width: auto; max-height: 46%; }
+  .dock { gap: 6px; }
+  .group { padding: 4px; }
+  .group button { padding: 5px 8px; font-size: 13px; }
+  .group .lbl { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .loading, .toast { transition: none; } }
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+
+<canvas id="view" aria-label="实时渲染的海面"></canvas>
+<div class="hud" id="hud">
+  <div class="brand">
+    <h1>风生浪<small>WINDSEA · 风与浪物理一致的海面</small></h1>
+    <div class="status" id="status">正在起浪…</div>
+  </div>
+
+  <aside class="panel" id="panel" aria-label="海况与画面参数">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="sea" id="tabSea">风与浪</button>
+      <button role="tab" aria-selected="false" data-tab="look" id="tabLook">画面</button>
+    </div>
+
+    <section data-pane="sea">
+      <div class="row"><label for="wind">风速</label><input id="wind" type="range" min="0" max="30" step="0.5"><output id="windOut"></output></div>
+      <div class="row"><label for="windDir">风来向</label><input id="windDir" type="range" min="0" max="359" step="1"><output id="windDirOut"></output></div>
+      <div class="row"><label for="fetch">风区</label><input id="fetch" type="range" min="0" max="1" step="0.001"><output id="fetchOut"></output></div>
+      <div class="row"><label for="depth">水深</label><input id="depth" type="range" min="0" max="1" step="0.001"><output id="depthOut"></output></div>
+      <div class="row"><label for="timeScale">时间加速</label><input id="timeScale" type="range" min="0" max="1" step="0.001"><output id="timeScaleOut"></output></div>
+      <div class="btns"><button id="calmBtn">从零起浪</button><button id="developBtn">直接充分发展</button></div>
+      <p class="note">浪按风速、风区（上风开阔水面长度）和持续时间生长：先受风时限制，再受风区限制，最后充分发展。风变弱或转向，旧浪变成涌浪慢慢衰减。</p>
+
+      <h3>远方涌浪</h3>
+      <div class="row"><label for="swellH">浪高</label><input id="swellH" type="range" min="0" max="5" step="0.1"><output id="swellHOut"></output></div>
+      <div class="row"><label for="swellT">周期</label><input id="swellT" type="range" min="6" max="20" step="0.5"><output id="swellTOut"></output></div>
+      <div class="row"><label for="swellDir">来向</label><input id="swellDir" type="range" min="0" max="359" step="1"><output id="swellDirOut"></output></div>
+
+      <h3>读数（理论 / 模拟实测）</h3>
+      <dl class="read" id="read"></dl>
+      <canvas class="spark" id="spark" width="640" height="156" aria-label="有效波高随海况时间的变化"></canvas>
+    </section>
+
+    <section data-pane="look" hidden>
+      <div class="row"><label for="tod">时刻</label><input id="tod" type="range" min="0" max="24" step="0.05"><output id="todOut"></output></div>
+      <div class="row"><label for="clouds">云量</label><input id="clouds" type="range" min="0" max="1" step="0.01"><output id="cloudsOut"></output></div>
+      <div class="row"><label for="storm">风暴</label><input id="storm" type="range" min="0" max="1" step="0.01"><output id="stormOut"></output></div>
+      <div class="row"><label for="exposure">曝光</label><input id="exposure" type="range" min="0.2" max="1.4" step="0.01"><output id="exposureOut"></output></div>
+      <div class="row"><label for="chop">尖峰</label><input id="chop" type="range" min="0.6" max="1.6" step="0.01"><output id="chopOut"></output></div>
+      <div class="row"><label for="grade">调色</label><select id="grade"><option value="golden">黄昏</option><option value="storm">风暴</option><option value="tropical">晴空</option><option value="moonlight">月夜</option><option value="dawn">黎明</option></select><output></output></div>
+      <div class="row"><label for="quality">画质</label><select id="quality"><option value="ultra">极高</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><output></output></div>
+      <div class="row"><label for="debug">调试视图</label><select id="debug"><option value="0">关闭</option><option value="1">法线</option><option value="2">泡沫</option><option value="3">粗糙度</option><option value="4">菲涅尔</option><option value="5">尾迹</option><option value="7">阵风</option><option value="8">雅可比</option></select><output></output></div>
+      <label class="check"><input type="checkbox" id="letterbox"> 2.39:1 宽银幕</label>
+      <label class="check"><input type="checkbox" id="rain"> 雨</label>
+      <p class="note">拖动画面转视角，滚轮推拉。快捷键：1–6 切换镜头，C 换机位，H 隐藏界面，空格暂停。</p>
+    </section>
+  </aside>
+
+  <div class="dock">
+    <div class="group" id="shots" role="group" aria-label="镜头"><span class="lbl">镜头</span></div>
+    <div class="group" id="cams" role="group" aria-label="机位"><span class="lbl">机位</span></div>
+    <div class="group"><button id="panelBtn" aria-pressed="true">面板</button><button id="hideBtn">隐藏界面</button></div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+<div class="loading" id="loading">正在生成海面…</div>
+<script type="module" src="./main.js"></script>
+<!-- ARTIFACT:END -->
+</body>
+</html>

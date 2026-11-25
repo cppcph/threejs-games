@@ -4,10 +4,14 @@
   "description": "四款纯程序生成的 Three.js 浏览器游戏（无模型、贴图、音频文件）",
   "scripts": {
     "serve": "python3 -m http.server 8000",
-    "play": "node tools/play.cjs"
+    "play": "node tools/play.cjs",
+    "build:ocean": "node tools/build-ocean-demo.mjs node_modules/.bin/esbuild out/windsea.html",
+    "test:ocean": "node --test tests/ocean/windsea.test.mjs"
   },
   "devDependencies": {
     "playwright": "1.63.0",
-    "three": "0.170.0"
-  }
+    "three": "0.170.0",
+    "esbuild": "0.24.0"
+  },
+  "type": "module"
 }

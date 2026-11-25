@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>波谱校验</title>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<pre id="out">running…</pre>
+<script type="module">
+// 理论 Hs（WindSeaModel）与 GPU 模拟海面实测 Hs（回读高度场方差）对照
+import * as THREE from 'three';
+import { OceanSimulation } from '../../ocean/OceanSimulation.js';
+import { WindSeaModel } from '../../ocean/WindSeaModel.js';
+
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(64, 64);
+const sim = new OceanSimulation(renderer, { size: 256 });
+const cases = [
+  { name: '10 m/s 充分发展', wind: [10, 0], fetch: 5e6, develop: 1 },
+  { name: '20 m/s 充分发展', wind: [14, 14], fetch: 5e6, develop: 1 },
+  { name: '12 m/s 风区 40 km', wind: [0, 12], fetch: 40e3, develop: 1 },
+  { name: '8 m/s 吹 2 小时', wind: [8, 0], fetch: 5e6, develop: 0.25 },
+  { name: '涌浪 2 m / 12 s + 5 m/s 风浪', wind: [5, 0], fetch: 5e6, develop: 1, swell: { Hs: 2, Tp: 12, theta: 0.6 } },
+  { name: '浅水 6 m，15 m/s', wind: [15, 0], fetch: 5e6, develop: 1, depth: 6 },
+];
+const rows = [];
+for (const c of cases) {
+  const m = new WindSeaModel({ wind: { x: c.wind[0], z: c.wind[1] }, fetch: c.fetch, depth: c.depth ?? 2000 });
+  m.develop(c.develop);
+  if (c.swell) m.setBackgroundSwell(c.swell);
+  const p = m.spectrumParams();
+  // 多个时刻取平均，减小单次样本的统计起伏
+  let acc = 0, n = 0;
+  for (let t = 0; t < 6; t++) {
+    sim.update(t === 0 ? 0.01 : 7.3, p);
+    const before = sim.measured.samples;
+    for (let i = 0; i < 300 && sim.measured.samples === before; i++) await new Promise((r) => setTimeout(r, 10));
+    acc += sim.measured.Hs ** 2; n++;
+  }
+  const measured = Math.sqrt(acc / n);
+  rows.push({ name: c.name, model: +m.readout.Hs.toFixed(3), simulated: +measured.toFixed(3), ratio: +(measured / m.readout.Hs).toFixed(3), Tp: +m.readout.Tp.toFixed(2) });
+}
+window.__spec = rows;
+document.getElementById('out').textContent = JSON.stringify(rows, null, 2);
+</script>
+</body>
+</html>

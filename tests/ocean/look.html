@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>海面看图</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<script type="module">
+// 海面着色看图：Sky.js 天空 + 立方体反射，脚本通过 window.__look 控制机位、风、时刻并渲染单帧
+import * as THREE from 'three';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Ocean } from '../../ocean/index.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 0.55;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.1, 200000);
+
+const sky = new Sky(); sky.scale.setScalar(150000);
+const su = sky.material.uniforms;
+su.turbidity.value = 3.2; su.rayleigh.value = 1.4; su.mieCoefficient.value = 0.004; su.mieDirectionalG.value = 0.8;
+scene.add(sky);
+const skyScene = new THREE.Scene(); const sky2 = new Sky(); sky2.scale.setScalar(1000); sky2.material = sky.material; skyScene.add(sky2);
+const cubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+const cubeCam = new THREE.CubeCamera(1, 5000, cubeRT);
+
+const ocean = new Ocean(renderer, { quality: new URLSearchParams(location.search).get('q') || 'high', sea: { wind: { x: 12, z: 0 }, fetch: 600e3, timeScale: 1 } });
+scene.add(ocean.mesh);
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.32, 0.55, 1.1);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+const light = { sunDirection: new THREE.Vector3(), sunColor: new THREE.Color(), ambientColor: new THREE.Color(), envMap: cubeRT.texture, envMaxMip: 8 };
+function setSun(elevDeg, azDeg) {
+  const e = THREE.MathUtils.degToRad(elevDeg), a = THREE.MathUtils.degToRad(azDeg);
+  light.sunDirection.set(Math.cos(e) * Math.sin(a), Math.sin(e), -Math.cos(e) * Math.cos(a)).normalize();
+  su.sunPosition.value.copy(light.sunDirection).multiplyScalar(1000);
+  // Kasten–Young 大气质量 + 分通道消光
+  const m = 1 / (Math.max(Math.sin(e), 0) + 0.50572 * Math.pow(Math.max(elevDeg, 0) + 6.07995, -1.6364));
+  const k = [0.11, 0.2, 0.39];
+  const I = 6.5 * THREE.MathUtils.smoothstep(elevDeg, -2, 3);
+  light.sunColor.setRGB(I * Math.exp(-k[0] * m), I * Math.exp(-k[1] * m), I * Math.exp(-k[2] * m));
+  const day = THREE.MathUtils.smoothstep(elevDeg, -6, 12);
+  light.ambientColor.setRGB(0.05 + 0.25 * day, 0.07 + 0.33 * day, 0.11 + 0.45 * day);
+  cubeCam.update(renderer, skyScene);
+}
+
+window.__look = {
+  ocean,
+  async render({ elev = 8, az = 0, wind = [12, 0], develop = 1, swell = null, cam = [0, 3, 0], look = [0, 1.5, -100], fov = 52, steps = 90, debug = 0, chop = 1, depth = 2000, fetch = 600e3 } = {}) {
+    setSun(elev, az);
+    camera.fov = fov; camera.updateProjectionMatrix();
+    camera.position.set(...cam); camera.lookAt(...look);
+    ocean.model.setWind(wind[0], wind[1]); ocean.model.snapWind();
+    ocean.model.setFetch(fetch); ocean.model.setDepth(depth);
+    ocean.model.calm(); ocean.model.develop(develop);
+    ocean.model.setBackgroundSwell(swell);
+    ocean.resetWhitecaps();
+    ocean.params.choppiness = chop;
+    ocean.setDebugView(debug);
+    // 每 8 步（约 0.27 s 海面时间）等一次异步测量完成，模拟实际帧率下白浪校准的节奏
+    for (let i = 0; i < steps; i++) {
+      ocean.update(1 / 30, camera, light);
+      if (i % 8 === 7) {
+        const s0 = ocean.sim.measured.foamSamples;
+        for (let k = 0; k < 60 && ocean.sim.measured.foamSamples === s0; k++) await new Promise((r) => setTimeout(r, 5));
+      }
+    }
+    if (window.__mode === 'direct') renderer.render(scene, camera);
+    else { bloom.enabled = window.__mode !== 'nobloom'; composer.render(); }
+    return ocean.readout;
+  },
+};
+// 诊断：把场景渲染到 32 位浮点目标，读一行像素的数值
+window.__look.probe = (row) => {
+  const t = new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.FloatType });
+  renderer.setRenderTarget(t); renderer.render(scene, camera);
+  const b = new Float32Array(innerWidth * 4);
+  renderer.readRenderTargetPixels(t, 0, innerHeight - 1 - row, innerWidth, 1, b);
+  renderer.setRenderTarget(null); t.dispose();
+  let nan = 0, inf = 0, max = 0, maxAt = -1, big = 0;
+  for (let i = 0; i < innerWidth; i++) for (let k = 0; k < 3; k++) {
+    const v = b[i * 4 + k];
+    if (Number.isNaN(v)) nan++; else if (!Number.isFinite(v)) inf++; else { if (v > 65504) big++; if (v > max) { max = v; maxAt = i; } }
+  }
+  return { nan, inf, big, max, maxAt, sample: Array.from(b.slice(300 * 4, 300 * 4 + 3)) };
+};
+window.__ready = true;
+</script>
+</body>
+</html>

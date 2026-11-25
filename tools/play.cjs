@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // 无头浏览器试玩 / 截图脚本（Playwright + Chromium）。
 //
-//   node tools/play.cjs <页面.html> <输出目录> [场景.cjs] [--w=1280] [--h=720] [--dpr=1] [--mobile] [--log]
+//   node tools/play.cjs <页面.html> <输出目录> [场景.cjs] [--w=1280] [--h=720] [--dpr=1] [--mobile] [--log] [--root=目录]
 //
 // - 页面可以是完整网页，也可以是 Artifact 片段（自动套骨架）。
+// - --root（默认当前目录）下的文件按 URL 路径提供，页面里的相对 import 能正常加载。
 // - 若存在 node_modules/three（npm install 后就有）或设置了 THREE_VENDOR=<three 包目录>，
 //   对 cdn.jsdelivr.net/npm/three@0.170.0 的请求会改由本地文件应答，断网也能测。
 // - 场景文件导出 async (page, h) => {}，h 提供：
@@ -34,7 +35,20 @@ const html = /^\s*<!doctype/i.test(raw) ? raw : `<!doctype html><html lang="zh-C
 ${raw}
 </body></html>`;
 
-const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(html); });
+// 静态文件根目录（默认当前目录）：页面里的相对 import（如 ../../ocean/Ocean.js）从这里取
+const ROOT = path.resolve(flags.root || process.cwd());
+const pageRel = path.relative(ROOT, path.resolve(pageFile)).split(path.sep).join('/');
+const PAGE_URL = pageRel.startsWith('..') ? '/' : '/' + pageRel;
+const TYPES = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.md': 'text/plain; charset=utf-8' };
+const server = http.createServer((req, res) => {
+  const url = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (url === PAGE_URL || url === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(html); }
+  const fp = path.join(ROOT, url);
+  if (!fp.startsWith(ROOT) || !fs.existsSync(fp) || fs.statSync(fp).isDirectory()) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'content-type': TYPES[path.extname(fp)] || 'application/octet-stream' });
+  res.end(fs.readFileSync(fp));
+});
 
 (async () => {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -65,7 +79,7 @@ const server = http.createServer((req, res) => { res.writeHead(200, { 'content-t
   }
 
   const t0 = Date.now();
-  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
+  await page.goto(`http://127.0.0.1:${port}${PAGE_URL}`, { waitUntil: 'load' });
   let n = 0;
   const h = {
     page, errors,

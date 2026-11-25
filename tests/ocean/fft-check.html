@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FFT 校验</title>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<pre id="out">running…</pre>
+<script type="module">
+// GPU 逆 FFT 与 CPU 逐点 DFT 对照：位移、导数、雅可比、坡度、CPU 回读采样全部比对。
+import * as THREE from 'three';
+import { OceanSimulation } from '../../ocean/OceanSimulation.js';
+
+const N = 16, Ls = [32, 16, 4], LAMBDA = 1.3, DEPTH = 2000, DT = 37.25;
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(64, 64);
+const sim = new OceanSimulation(renderer, { size: N, cascades: Ls, readback: [N, N], outputType: THREE.FloatType, choppiness: LAMBDA });
+
+// 随机 h0，且 h0(−k) 取镜像位置的值 → 各物理量为实数场
+let seed = 7;
+const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+const h0 = new Float32Array(N * N * 3 * 4);
+const base = [];
+// 按级缩小幅度，使导数不超过组装时的 ±8 限幅（检验的是 FFT 本身的精度）
+const AMP = [0.06, 0.012, 0.0012];
+for (let i = 0; i < N * N * 3; i++) { const a = AMP[Math.floor(i / (N * N))]; base.push([rnd() * a, rnd() * a]); }
+const mirror = (c, x, y) => c * N * N + ((N - y) % N) * N + ((N - x) % N);
+for (let c = 0; c < 3; c++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+  if (x === 0 || y === 0) continue;                    // 奈奎斯特行列为零（与波谱着色器一致）
+  const i = c * N * N + y * N + x, m = mirror(c, x, y);
+  h0.set([base[i][0], base[i][1], base[m][0], base[m][1]], i * 4);
+}
+sim.debugSetH0(h0);
+sim.update(DT);
+
+// 读出 GPU 结果：把 MRT 的第 0、1 张纹理复制到单张浮点目标再读
+const copyTarget = new THREE.WebGLRenderTarget(N, N, { type: THREE.FloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false });
+const copyMat = new THREE.RawShaderMaterial({
+  glslVersion: THREE.GLSL3, uniforms: { t: { value: null } },
+  vertexShader: 'in vec3 position; void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: 'precision highp float; uniform sampler2D t; out vec4 o; void main(){ o = texelFetch(t, ivec2(gl_FragCoord.xy), 0); }',
+});
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMat); quad.frustumCulled = false;
+const scene = new THREE.Scene(); scene.add(quad);
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+function read(tex) {
+  copyMat.uniforms.t.value = tex;
+  renderer.setRenderTarget(copyTarget); renderer.render(scene, cam);
+  const buf = new Float32Array(N * N * 4);
+  renderer.readRenderTargetPixels(copyTarget, 0, 0, N, N, buf);
+  renderer.setRenderTarget(null);
+  return buf;
+}
+
+// CPU 参考
+const G = 9.81, W0 = 2 * Math.PI / 2048;
+function reference(c) {
+  const L = Ls[c], out = [];
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const acc = { Dx: 0, Dz: 0, h: 0, Dxz: 0, hx: 0, hz: 0, Dxx: 0, Dzz: 0 };
+    for (let m = 0; m < N; m++) for (let n = 0; n < N; n++) {
+      const kx = 2 * Math.PI / L * (n - N / 2), kz = 2 * Math.PI / L * (m - N / 2), k = Math.hypot(kx, kz);
+      if (k < 1e-6) continue;
+      let w = Math.sqrt(G * k * Math.tanh(Math.min(k * DEPTH, 20)));
+      w = Math.floor(w / W0) * W0;
+      const ph = w * (DT % 2048);
+      const idx = (c * N * N + m * N + n) * 4;
+      const [a, b, cr, ci] = [h0[idx], h0[idx + 1], h0[idx + 2], h0[idx + 3]];
+      // h = h0·e^(−iφ) + conj(h0m)·e^(iφ)
+      const hr = a * Math.cos(ph) + b * Math.sin(ph) + cr * Math.cos(ph) + ci * Math.sin(ph);
+      const hi = b * Math.cos(ph) - a * Math.sin(ph) - ci * Math.cos(ph) + cr * Math.sin(ph);
+      const ang = 2 * Math.PI * ((n - N / 2) * i + (m - N / 2) * j) / N;
+      const er = Math.cos(ang), ei = Math.sin(ang);
+      const re = (xr, xi) => xr * er - xi * ei;           // Re[(xr + i xi) e^(i ang)]
+      acc.h += re(hr, hi);
+      acc.Dx += re(-(kx / k) * hi, (kx / k) * hr);         // i·k̂x·h
+      acc.Dz += re(-(kz / k) * hi, (kz / k) * hr);
+      acc.hx += re(-kx * hi, kx * hr);
+      acc.hz += re(-kz * hi, kz * hr);
+      acc.Dxx += re(-(kx * kx / k) * hr, -(kx * kx / k) * hi);
+      acc.Dzz += re(-(kz * kz / k) * hr, -(kz * kz / k) * hi);
+      acc.Dxz += re(-(kx * kz / k) * hr, -(kx * kz / k) * hi);
+    }
+    const jxx = 1 + LAMBDA * acc.Dxx, jzz = 1 + LAMBDA * acc.Dzz, jxz = LAMBDA * acc.Dxz;
+    const c8 = (v) => Math.min(8, Math.max(-8, v));   // 与组装着色器相同的限幅（防半精度溢出）
+    out.push({
+      disp: [LAMBDA * acc.Dx, acc.h, LAMBDA * acc.Dz, c8(jxx * jzz - jxz * jxz)],
+      slope: [c8(acc.hx / Math.max(jxx, 0.2)), c8(acc.hz / Math.max(jzz, 0.2))],
+    });
+  }
+  return out;
+}
+
+const result = { cascades: [], readback: null };
+let worst = 0;
+for (let c = 0; c < 3; c++) {
+  const ref = reference(c);
+  const disp = read(sim.cascades[c].displacement), slope = read(sim.cascades[c].slope);
+  let maxErr = 0, maxMag = 0;
+  for (let p = 0; p < N * N; p++) {
+    for (let k = 0; k < 4; k++) { maxErr = Math.max(maxErr, Math.abs(disp[p * 4 + k] - ref[p].disp[k])); maxMag = Math.max(maxMag, Math.abs(ref[p].disp[k])); }
+    for (let k = 0; k < 2; k++) { maxErr = Math.max(maxErr, Math.abs(slope[p * 4 + k] - ref[p].slope[k])); maxMag = Math.max(maxMag, Math.abs(ref[p].slope[k])); }
+  }
+  result.cascades.push({ maxErr, maxMag, rel: maxErr / maxMag });
+  worst = Math.max(worst, maxErr / maxMag);
+}
+
+// 回读：等异步完成，再在两级网格都对齐的点上比对 级联0 + 级联1 之和
+const refs = [reference(0), reference(1)];
+const wait = async () => { for (let i = 0; i < 200 && !sim.ready; i++) await new Promise((r) => setTimeout(r, 20)); };
+await wait();
+let rbErr = 0;
+if (sim.ready) {
+  const o = { x: 0, y: 0, z: 0 };
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const x0 = i * Ls[0] / N, z0 = j * Ls[0] / N;               // 级联 0 网格点（间距 2 m）
+    const i1 = Math.round(x0 / (Ls[1] / N)) % N, j1 = Math.round(z0 / (Ls[1] / N)) % N;
+    const e0 = refs[0][j * N + i].disp, e1 = refs[1][j1 * N + i1].disp;
+    sim.displacementAt(x0, z0, o);
+    rbErr = Math.max(rbErr, Math.abs(o.x - e0[0] - e1[0]), Math.abs(o.y - e0[1] - e1[1]), Math.abs(o.z - e0[2] - e1[2]));
+  }
+}
+result.readback = { ready: sim.ready, maxErr: rbErr, rel: rbErr / result.cascades[0].maxMag, measuredHs: sim.measured.Hs };
+// 阈值按 float32 精度设：GPU 对几百弧度的相位做 sin/cos 有 1e-4 量级误差；结构性错误（顺序、符号）会是 0.1–1 量级
+result.ok = worst < 2e-3 && sim.ready && result.readback.rel < 1e-3;
+window.__fftResult = result;
+document.getElementById('out').textContent = JSON.stringify(result, null, 2);
+</script>
+</body>
+</html>
