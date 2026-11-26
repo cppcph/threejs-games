@@ -300,8 +300,15 @@ void main() {
     shoreFoam = smoothstep(0.25, 0.0, waterDepth) * (0.6 + 0.4 * fbm3(np * 0.4 + uTime * 0.2));
   }
   // 图案（随表面漂流）：两层不同尺度、旋转 37° 的同一张均衡纹理，合成后再映射回均匀分布
-  vec4 ft = texture2D(uFoamTex, vLocal / uFoamParams.w + uFoamOff.xy);
-  vec4 ft2 = texture2D(uFoamTex, vec2(0.8 * vLocal.x - 0.6 * vLocal.y, 0.6 * vLocal.x + 0.8 * vLocal.y) / (uFoamParams.w * 0.29) + uFoamOff.zw);
+  vec2 l2 = vec2(0.8 * vLocal.x - 0.6 * vLocal.y, 0.6 * vLocal.x + 0.8 * vLocal.y);
+  vec4 ft2 = texture2D(uFoamTex, l2 / (uFoamParams.w * 0.29) + uFoamOff.zw);
+  // 粗层的细胞边按第二层的细节弯一弯（约 ±0.2 m）：近看不再是直边的多边形网
+  vec4 ft = texture2D(uFoamTex, vLocal / uFoamParams.w + uFoamOff.xy + (ft2.ba - 0.5) * 0.035);
+  // 近处的细节层：第二层的 1/3 尺度（泡沫花边里 10 cm 量级的小洞、碎边），图案细于几个像素时淡出，
+  // 远处与原来完全相同。尺度比取整数，漂流偏移按同一倍数放大后仍无缝
+  vec2 uvF = l2 / (uFoamParams.w * 0.29 / 3.0) + uFoamOff.zw * 3.0 + vec2(0.37, 0.71) + (ft.ab - 0.5) * 0.6;
+  float ftF = texture2D(uFoamTex, uvF).r;
+  float wF = 1.0 - smoothstep(0.02, 0.05, length(fwidth(uvF)));
   // 泡沫丝：实拍里是弯曲、分叉、断续的“大理石纹”，不是直线。沿风向只拉长 3 倍，再做两层扭曲；
   // 成条成带的走向由白浪场里的朗缪尔环流决定，图案只负责细丝的样子
   vec2 wl = lp + vec2((fbm3(lp / 23.0 + 3.1) - 0.5) * 6.0, (fbm3(lp / 9.0) - 0.5) * 3.0 + (fbm3(lp / 45.0) - 0.5) * 4.0);
@@ -310,7 +317,9 @@ void main() {
   float fB = clamp(max(frc.y * uFoamParams.x, max(wakeFoam, shoreFoam)), 0.0, 1.0);
   float fC = clamp(frc.z * uFoamParams.x, 0.0, 1.0);
   float mA = coverMask(uniformSum(ft.g, ft2.b, 0.6), fA);
-  float mB = coverMask(uniformSum(ft.r, ft2.r, 0.62), fB);
+  float pB = uniformSum(ft.r, ft2.r, 0.62);
+  pB = mix(pB, uniformSum(pB, ftF, 0.6), wF);
+  float mB = coverMask(pB, fB);
   float mC = coverMask(uniformSum(fil, ft.r, 0.65), fC);
   // 残留泡沫随时间变薄：气泡破裂，泡沫筏变稀、变透明，反射率下降（Koepke 1984：新鲜 0.55，
   // 按寿命平均的有效值只有 0.22）。年龄来自白浪场的新鲜度示踪：F/B = e^(−年龄/τB)。
