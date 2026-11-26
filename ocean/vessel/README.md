@@ -5,7 +5,7 @@
 
 ```
 ocean/vessel/
-  SailingYacht.js    组装：质量 / 惯性、附加质量、积分器、控制、遥测、事件
+  SailingYacht.js    组装：质量 / 惯性、附加质量、积分器、控制、遥测、事件、辅机、触底接触
   HullShape.js       HullGenerator 型线公式的纯 JS 复刻 + Sailboat 的布置（桅、帆、长龙骨、艉挂舵、舱室）
   HullMesh.js        物理网格：闭合船体（壳 + 艉板 + 甲板 / 舱室）、龙骨板、舵板
   Hydrostatics.js    三角面水压积分（静水力 + Froude–Krylov）、面元摩擦、辐射阻尼、砰击；平衡浮态与 GZ 曲线
@@ -17,7 +17,7 @@ ocean/vessel/
   vmath.js interp.js index.js
 ```
 
-测试：`node --test tests/ocean/vessel.test.mjs`（12 项，约 30 s）。
+测试：`node --test tests/ocean/vessel.test.mjs`（14 项，约 40 s）。
 真实海面上的浏览器检查：`THREE_VENDOR=<three 包目录> node tools/play.cjs tests/ocean/vessel-check.html <输出目录> tests/ocean/vessel-check.cjs --root=.`
 
 ## 用法
@@ -33,7 +33,7 @@ yacht.reset({ x: 0, z: 0, yaw, speed: 3 });                          // yaw：th
 yacht.setControls({ mode: 'twa', target: 50 * Math.PI / 180, tack: 'port', sheet: 'auto' });
 
 // 每帧
-yacht.step(dt, { ocean, wind: { x, z } });       // wind = 10 m 高真风 U10（m/s，指向下风）；内部 ≥ 120 Hz 子步
+yacht.step(dt, { ocean, wind: { x, z }, ground });   // wind = 10 m 高真风 U10（m/s，指向下风）；ground(x, z) = 地面高度（可省略）；内部 ≥ 120 Hz 子步
 applyToThree(yacht, boat, { dt, time, sky });     // 位置、四元数 → boat.group；帆的外观 → boat.applyPhysics
 emitSpray(yacht, spray);                          // 砰击 / 飞溅事件 → Spray 粒子
 driveWake(yacht, hullWake, dt);                   // 船行波 → WakeMap.createHullEmitter(...)
@@ -41,18 +41,20 @@ driveWake(yacht, hullWake, dt);                   // 船行波 → WakeMap.creat
 
 | 成员 | 说明 |
 |---|---|
-| `setControls({ mode, target, tack, rudder, sheet, flat, reef, heelLimit })` | `mode`：`'twa'`（target = 真风角大小，弧度；tack = `'port'`/`'starboard'`）、`'heading'`（target = yaw）、`'manual'`（rudder，弧度）。`sheet`：`'auto'` 或 0 收紧 … 1 放松；`flat` / `reef`：`'auto'` 或 0.5–1 / 0.45–1；`heelLimit`：自动调帆横倾上限（默认 20°） |
+| `setControls({ mode, target, tack, rudder, sheet, flat, reef, heelLimit, motor })` | `mode`：`'twa'`（target = 真风角大小，弧度；tack = `'port'`/`'starboard'`）、`'heading'`（target = yaw）、`'manual'`（rudder，弧度；+ = 后缘偏向左舷 → 向左转）。`sheet`：`'auto'` 或 0 收紧 … 1 放松；`flat` / `reef`：`'auto'` 或 0.5–1 / 0.45–1；`heelLimit`：自动调帆横倾上限（默认 20°）；`motor`：辅机油门 −1（全速倒车）… 1（全速正车），默认 0 |
 | `tack()` / `gybe()` / `changeTack()` | 迎风换舷 / 顺风换舷 / 按当前真风角自动选择 |
 | `reset({ x, z, yaw, speed, heel, pitch, y })` | 重新放船 |
 | `state` | `position`（船体原点 = 水线中心，世界坐标）、`quaternion`、`velocity`（重心）、`angularVelocity`（世界）、`cg` |
 | `telemetry` | 见下表 |
 | `events` | 本步的砰击 / 飞溅：`{ position, velocity（射流）, normal, speed（入水速度）, area, areaRate, intensity 0–1 }` |
+| `ground` | 本步的触底：`{ contact, points（接触点数）, force（法向力合力 N，子步平均）, impact（新接触的入射速度 m/s）, slide（接触处滑动速度）, position, normal }` |
 | `wake` | `{ bow, stern, direction, speed, Fn, kelvinAngle, angle（表观半角）, amplitude（m）, strength 0–1 }` |
-| `sail` | `{ side, boomAngle, jibSheet, luff, fill, aws, awa, awLocal }`（给 `Sailboat.applyPhysics`） |
+| `sail` | `{ side, boomAngle, jibSheet, luff, fill, aws, awa, awLocal, rudder }`（给 `Sailboat.applyPhysics`；rudder 让画面上的舵跟着转） |
+| `motor` / `contactPoints` / `groundParams` | 辅机参数（见 `MOTOR_DEFAULTS`）、触底接触点（船体坐标，按部件分组）、接触参数（见 `GROUND_DEFAULTS`） |
 | `stability(heels)` | 静稳性曲线 `[{ heel, GZ, RM, trim, y }]` |
 | `particulars` | 主尺度、质量分布、惯性、附加质量、阻尼、固有周期 |
 
-遥测（`telemetry`）：`speed / speedKn`（对水）、`sog / cog`、`yaw`、`heading`（罗经方位，0 = 北 = −Z）、`leeway`（顺时针为正 = 向右舷横漂）、`heel`（+ = 右舷下沉）、`pitch`（+ = 船首抬起）、`tws / twa`、`aws / awa`（帆受力中心处、横倾后的有效视风；+ = 右舷来风）、`awsMasthead / awaMasthead`、`vmg`、`sailCL / sailCD / flat / reef / sheet / boomAngle`、`driveForce / sideForce`、`heelingMoment / rightingMoment`、`resistance { friction, residuary, induced, appendage, radiation, windage, total }`、`sideForceKeel / Rudder / Hull`、`rudderAngle`、`helm`（+ = 上风舵）、`Fn`、`hullSpeedKn`、`displacement`（瞬时水压竖直力 / g）、`mass`、`wettedArea / wettedAreaHull`、`waterplaneArea`。力、力矩、阻力分解做了 τ = 0.5 s 的平滑。
+遥测（`telemetry`）：`speed / speedKn`（对水）、`sog / cog`、`yaw`、`heading`（罗经方位，0 = 北 = −Z）、`leeway`（顺时针为正 = 向右舷横漂）、`heel`（+ = 右舷下沉）、`pitch`（+ = 船首抬起）、`tws / twa`、`aws / awa`（帆受力中心处、横倾后的有效视风；+ = 右舷来风）、`awsMasthead / awaMasthead`、`vmg`、`sailCL / sailCD / flat / reef / sheet / boomAngle`、`driveForce / sideForce`、`heelingMoment / rightingMoment`、`resistance { friction, residuary, induced, appendage, radiation, windage, total }`、`sideForceKeel / Rudder / Hull`、`rudderAngle`、`helm`（+ = 上风舵）、`Fn`、`hullSpeedKn`、`displacement`（瞬时水压竖直力 / g）、`mass`、`wettedArea / wettedAreaHull`、`waterplaneArea`、`motor`（油门，滤波后）/ `thrust`（N）、`grounded / groundForce / groundContacts`。力、力矩、阻力分解做了 τ = 0.5 s 的平滑。
 
 ### 接入 examples/ocean/main.js（替换 Buoyancy + 极曲线）
 
@@ -196,7 +198,36 @@ M_h·v̇_h = F_h − ψ̇ ŷ × (M_h v_h)          M_h = m + A（横荡、升沉
 - 跨水线、竖直方向正在压入水中的面元附加 `p_s = ½ρ C_s v_n²`（C_s = 1，竖直力）。上一子步完全在水上、这一子步入水且 v_n > 0.8 m/s 的面元记为事件，按 船首 / 中 / 尾 × 左 / 右 六区以 v_n²A 加权汇总：位置、法线、入水速度；射流速度 = 该点速度 + 2·v_n·（沿船壳向外向上的切向），即 Wagner (1932) 理论中溅射根部射流约为入水速度的 2 倍；强度 = v_n² × 新浸湿面积速率 / 8。
 - 尾迹：Kelvin 角 asin(1/3) = 19.47°；Fn ≳ 0.6 时船长限制了最长的波（k ≥ 2π/L），表观半角 `sin α = c_g(2π/L)/U = 1/(2√(2π)·Fn)`，随 Fn⁻¹ 变窄（Rabaud & Moisy 2013，Fn 1 时 11.5°）。波幅由兴波阻力的能量通量估计 `A = √(4R_w/(ρ g L))`。
 
-### 11. 验证
+### 11. 辅机（`controls.motor`）
+
+舷内柴油机 + 两叶定距桨（`MOTOR_DEFAULTS`）。定转速下桨的推力系数 K_T 随进速系数 J 近似线性下降：
+
+```
+T = T₀ · (m² − m·V_a / V_p)，V_a = (1 − w)·桨处对水轴向速度          （m：油门 0…1，T₀ = 1200 N 系柱推力，V_p = 4.6 m/s，w = 0.15）
+倒车：T = −0.4·T₀ · (m² − m·V_a / (0.8·V_p))（m < 0；两叶定距桨倒车效率低）
+```
+
+推力沿船体纵轴作用在桨轴上（站位 0.14、船底下 0.25 m），所以加油门时船首略抬；油门按 0.5 s 时间常数跟随。
+正车时桨后的滑流冲到艉挂舵上（动量理论：远场增速 √(V_a² + 2T/(ρA)) − V_a，舵处取 0.8 倍、舵面 30% 在滑流里，按动压加权），
+漂着几乎不动时也有舵效 —— 靠港、脱浅都靠它。`dragArea` > 0 时停机的桨按 ½ρC_DA·V² 产生阻力（默认 0 = 折叠桨，
+与没有辅机时逐位相同）。
+
+### 12. 触底（`step(dt, { ground })`）
+
+`ground(x, z)` 返回地面高度（m，水下为负；也可以传带 `heightAt` 的对象）。接触点 76 个，都在画面船体的轮廓上：
+长龙骨下缘与前后缘 17 个、舵下半部 8 个、船体 51 个（中线龙骨线、两舷舭部与舷弧、船首柱）。
+
+- 每个点在地面以下时：沿地形法线（中心差分）的弹簧 `k·d_s·tanh(d·n_y / d_s)`（压入深度饱和，d_s = 0.5 m）+ 阻尼，只推不拉；
+  切向正则化库仑摩擦 `−μF_n·v_t / √(v_t² + v_ε²)`（μ = 0.45，v_ε = 0.1 m/s）。力换到船体坐标，与水动力、帆力一起积分。
+- 刚度按部件总量（龙骨 3 MN/m、舵 0.2 MN/m、船体 4 MN/m）平均分到各点：整条龙骨贴底时刚度正好是给定值，单点触底时更软；
+  阻尼按单点阻尼比 0.7（等效质量取半船质量）。
+- 稳定性：显式积分的阻尼与摩擦相当于粘性系数 c，c·h/m 超过 2 就发散。按上一子步的接触点数把每点的 c 限制在
+  0.5·m/(n·h) 以内；弹簧力合力不超过 3 倍船重（瞬移进地形时按比例缩小，船被慢慢推出来而不是弹飞）。
+- 粗检：每步开始时所有接触点离地都超过 1 m（加本步可能的位移）就整步跳过 —— 深水里没有任何额外开销，结果与不给 `ground` 逐位相同。
+
+冲上沙坡时龙骨先吃进沙里，船首抬起、船停住，风压下会倒向一舷躺在龙骨上（真实的长龙骨船搁浅就是这样）；撞上陡岸时弹回很小。
+
+### 13. 验证
 
 | 项目 | 结果 | 标准 / 参考 |
 |---|---|---|
@@ -213,6 +244,8 @@ M_h·v̇_h = F_h − ψ̇ ŷ × (M_h v_h)          M_h = m + A（横荡、升沉
 | 迎风换舷（10 kn） | 23.5 s 完成，最低 2.3 kn，70 s 后回到原速的 98%，冲过头 1.4° | 完成并重新加速 |
 | 不规则浪（17.5 kn 风，Hs 1.9 m 风浪 + 1.2 m 涌） | 真风角 45°：4.7 kn（航向误差均方根 3.9°）；60°：5.9 kn（4.5°）；120°：7.0 kn（1.3°） | — |
 | 真实 Ocean（浏览器，Hs 2.2 m，真风角 60°） | 平均 5.9 kn，航向误差均方根 4.6°，水线相对船下平均水面 +6 ± 12 cm，30 s 内 249 次砰击事件 | — |
+| 辅机（平静水面） | 全速正车 5.78 kn（推力 541 N = 阻力 540 N，Fn 0.32）；全速倒车 −3.8 kn；漂流（0.3 m/s）满舵 0.4°/s，开正车 6 s 后 13.6°/s（滑流舵效） | 8.6 m 巡航帆船配 10 kW 机：5–6 kn |
+| 触底 | 6.3 kn 冲上 1:4 沙坡：5 s 内停住（< 0.3 m/s），压入 8 cm，没冲上干岸；3.65 m/s 撞 3:1 陡岸：弹回 0.65 m/s、压入 28 cm；龙骨埋进地下 3.4 m 被推出时最大速度 < 4 m/s；深水（−36 m）与不给地形逐位相同 | 停住、不发散 |
 | 性能 | 每个 1/120 s 步 0.13–0.17 ms（规则波含水速采样、遥测）；平静水面子步约 0.09 ms | ≪ 1 ms |
 
 **极曲线对比**（平静水面，船速 kn）。参考：ORC 俱乐部证书 Beneteau Evasion 28（GRE 1505，非球帆：LOA 8.50 m、B 2.73 m、T 1.25 m、Δ 4204 kg、帆面积 36.8 m²；数据取自开源 ORC 证书库 jieter/orc-data）。本船帆面积小 18%（30.2 m²，轻风慢 10–20%），水线长（8.58 m 无悬伸，强风快 5–15%）：

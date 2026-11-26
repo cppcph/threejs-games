@@ -5,8 +5,11 @@
 // 发布成 claude.ai Artifact 时，发布器会自己套上 <!doctype html><head><body> 骨架，
 // 所以要发布的是两个标记之间的片段。
 //
-//   node tools/artifact.cjs unwrap games/windpost/index.html /tmp/windpost.fragment.html
-//   node tools/artifact.cjs wrap   /tmp/windpost.fragment.html games/windpost/index.html
+//   node tools/artifact.cjs unwrap games/foxfire/index.html /tmp/foxfire.fragment.html
+//   node tools/artifact.cjs wrap   /tmp/foxfire.fragment.html games/foxfire/index.html
+//
+// 页面若用 <script type="module" src="./main.js"> 引入 ES 模块（信风、海面演示），片段里的相对 import 发布后找不到，
+// 要用 tools/build-artifact.mjs 把入口和它 import 的模块打包成内联脚本。
 const fs = require('fs');
 
 const BEGIN = '<!-- ARTIFACT:BEGIN -->';

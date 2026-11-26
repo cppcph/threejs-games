@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>蒲福风级对照渲染</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<script type="module">
+// 与 NOAA 蒲福风级照片对照：船甲板高度的相机、充分发展的开阔海面、相机式自动曝光。
+//   window.__cmp.render({ force, U, ... }) 推进海面到稳态后渲染一帧，返回读数（含地平线所在行，供 tools 里的分析脚本做海面掩膜）
+import * as THREE from 'three';
+import { Ocean } from '../../ocean/index.js';
+import { SkyEnvironment } from '../../ocean/SkyEnvironment.js';
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.5, 200000);
+const sky = new SkyEnvironment(renderer, { cubeSize: 256 });
+scene.add(sky.object);
+const ocean = new Ocean(renderer, { quality: 'high', sea: { wind: { x: 8, z: 0 }, fetch: 2000e3, depth: 4000, timeScale: 1 } });
+scene.add(ocean.mesh);
+
+// 蒲福风级中值风速（m/s，WMO）与天空
+const BEAUFORT = [
+  { U: 0.3, clouds: 0.5, storm: 0 }, { U: 1.0, clouds: 0.5, storm: 0 }, { U: 2.6, clouds: 0.45, storm: 0 },
+  { U: 4.4, clouds: 0.45, storm: 0 }, { U: 6.7, clouds: 0.45, storm: 0 }, { U: 9.4, clouds: 0.5, storm: 0 },
+  { U: 12.3, clouds: 0.45, storm: 0 }, { U: 15.5, clouds: 0.75, storm: 0.2 }, { U: 18.9, clouds: 0.9, storm: 0.45 },
+  { U: 22.6, clouds: 1, storm: 0.65 }, { U: 26.4, clouds: 1, storm: 0.8 }, { U: 30.5, clouds: 1, storm: 0.9 }, { U: 34.0, clouds: 1, storm: 1 },
+];
+
+// 相机式自动曝光：把海面区域的对数平均亮度压到中灰
+const probeRT = new THREE.WebGLRenderTarget(128, Math.round(128 * H / W), { type: THREE.FloatType });
+function autoExposure(horizonFrac) {
+  const t = renderer.toneMapping; renderer.toneMapping = THREE.NoToneMapping;
+  renderer.setRenderTarget(probeRT); renderer.render(scene, camera); renderer.setRenderTarget(null);
+  renderer.toneMapping = t;
+  const w = probeRT.width, h = probeRT.height, b = new Float32Array(w * h * 4);
+  const gl = renderer.getContext(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  renderer.readRenderTargetPixels(probeRT, 0, 0, w, h, b);
+  let s = 0, n = 0;
+  const yTop = Math.floor(h * (1 - horizonFrac)) - 2;          // 读回的行从下往上
+  for (let y = 0; y < yTop; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4, L = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+    if (Number.isFinite(L)) { s += Math.log(1e-4 + L); n++; }
+  }
+  return 0.18 / Math.exp(s / Math.max(n, 1));
+}
+
+window.__cmp = {
+  ocean, sky,
+  async render({ force = 6, U = null, dir = 200, steps = 450, dt = 1 / 15, camHeight = 14, pitch = -20, fov = 50, tod = 13.5, sunAz = 2.2, upwind = true, exposure = null, ev = 0, clouds = null, storm = null } = {}) {
+    const B = { ...BEAUFORT[force] }, u = U ?? B.U;
+    if (clouds !== null) B.clouds = clouds;
+    if (storm !== null) B.storm = storm;
+    const th = THREE.MathUtils.degToRad(dir);
+    const wind = new THREE.Vector2(Math.cos(th) * u, Math.sin(th) * u);
+    const m = ocean.model;
+    m.setWind(wind.x, wind.y); m.snapWind(); m.setFetch(2000e3); m.setDepth(4000);
+    m.calm(); m.develop(1); m.setBackgroundSwell(null);
+    ocean.resetSea();
+    // 相机：甲板高度，迎风（船首顶浪）或顺风看
+    camera.fov = fov; camera.updateProjectionMatrix();
+    const look = upwind ? new THREE.Vector3(-wind.x, 0, -wind.y).normalize() : new THREE.Vector3(wind.x, 0, wind.y).normalize();
+    camera.position.set(0, camHeight, 0);
+    const p = THREE.MathUtils.degToRad(pitch);
+    camera.lookAt(look.x * Math.cos(p) * 100, camHeight + Math.sin(p) * 100, look.z * Math.cos(p) * 100);
+    const gl = renderer.getContext();
+    for (let i = 0; i < steps; i++) {
+      sky.update(dt, { camera, timeOfDay: tod, cloudCover: B.clouds, storm: B.storm, wind, sunAzimuth: sunAz });
+      ocean.update(dt, camera, sky);
+      if (i % 6 === 5) { gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); await new Promise((r) => setTimeout(r, 0)); }
+    }
+    // 地平线所在的屏幕行（自上而下的比例）：视线俯角 = 地平线俯角（≈ √(2h/R)）
+    const dip = Math.sqrt(2 * camHeight / 6.371e6);
+    const horizonFrac = 0.5 - Math.tan(-p - dip) / (2 * Math.tan(THREE.MathUtils.degToRad(fov / 2)));
+    renderer.toneMappingExposure = (exposure ?? autoExposure(horizonFrac)) * Math.pow(2, ev);
+    renderer.render(scene, camera);
+    const r = ocean.readout, st = ocean.foam.stats;
+    return { force, U: u, Hs: r.Hs, simHs: r.simulatedHs, Tp: r.Tp, coverage: st.coverage, active: st.active, residual: st.residual, lace: st.lace,
+      monahan: r.whitecap, horizonFrac, exposure: renderer.toneMappingExposure };
+  },
+};
+window.__ready = true;
+</script>
+</body>
+</html>

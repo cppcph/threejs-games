@@ -87,7 +87,8 @@ const server = http.createServer((req, res) => {
     shot: async (name, opts = {}) => {
       const ext = opts.type === 'jpeg' ? 'jpg' : 'png';
       const f = path.join(outDir, `${String(++n).padStart(2, '0')}-${name}.${ext}`);
-      await page.screenshot({ path: f, ...opts }); console.log('[shot]', f); return f;
+      // 软件渲染且多个浏览器并行时一帧可能超过 30 s：SHOT_TIMEOUT（毫秒）可放宽
+      await page.screenshot({ path: f, timeout: +(process.env.SHOT_TIMEOUT || 30000), ...opts }); console.log('[shot]', f); return f;
     },
     hold: async (key, ms) => { await page.keyboard.down(key); await page.waitForTimeout(ms); await page.keyboard.up(key); },
     press: key => page.keyboard.press(key),

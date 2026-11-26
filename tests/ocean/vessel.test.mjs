@@ -282,3 +282,95 @@ test('性能：120 Hz 子步远低于 1 ms（规则波，含水速采样）', ()
   console.log(`  每个 1/120 s 步：${ms.toFixed(3)} ms`);
   assert.ok(ms < 1, `${ms} ms`);
 });
+
+test('辅机：平静水面全速正车 5–6 kn、推力 = 阻力；倒车后退；油门为 0 时与没有辅机逐位相同', () => {
+  const ocean = new FlatOcean();
+  const y = new SailingYacht();
+  y.setControls({ mode: 'heading', target: 0, motor: 1 });
+  y.reset({ yaw: 0 });
+  for (let i = 0; i < 60 * 90; i++) y.step(1 / 60, { ocean });
+  const t = y.telemetry;
+  console.log(`  全速正车 ${t.speedKn.toFixed(2)} kn，推力 ${t.thrust.toFixed(0)} N，总阻力 ${t.resistance.total.toFixed(0)} N，纵倾 ${t.pitch.toFixed(2)}°`);
+  within(t.speedKn, 5, 6.2, '全速正车航速（kn）');
+  near(t.thrust / t.resistance.total, 1, 0.05, '稳态：推力 = 阻力');
+  assert.ok(t.thrust < y.motor.thrust, '推力随航速下降（低于系柱推力）');
+  // 倒车：先刹住，再向后走
+  y.setControls({ motor: -1 });
+  for (let i = 0; i < 60 * 60; i++) y.step(1 / 60, { ocean });
+  const v = y.state.velocity, surge = v.x * Math.sin(y.telemetry.yaw) + v.z * Math.cos(y.telemetry.yaw);
+  console.log(`  全速倒车 ${(surge / KN).toFixed(2)} kn（负 = 后退）`);
+  within(surge / KN, -4.5, -2, '倒车航速（kn）');
+  // 油门 0：与从没碰过辅机的船逐位相同（风中航行 30 s）
+  const wind = windOf(10), a = new SailingYacht(), b = new SailingYacht();
+  for (const s of [a, b]) { s.setControls({ mode: 'twa', target: 60 * DEG, tack: 'port' }); s.reset({ yaw: windFrom(wind) - 60 * DEG, speed: 2.5 }); }
+  b.setControls({ motor: 0 });
+  for (let i = 0; i < 60 * 30; i++) { a.step(1 / 60, { wind }); b.step(1 / 60, { wind }); }
+  assert.deepEqual(b.state, a.state, '油门 0 不改变任何状态');
+  assert.equal(b.telemetry.thrust, 0);
+  // 低速舵效：漂着几乎不动时满舵转不动，开正车后滑流冲到舵上就能转
+  const c = new SailingYacht();
+  c.setControls({ mode: 'manual', rudder: 30 * DEG });
+  c.reset({ yaw: 0, speed: 0.3 });
+  for (let i = 0; i < 60 * 6; i++) c.step(1 / 60, { ocean });
+  const r0 = Math.abs(c.telemetry.yawRate);
+  c.setControls({ motor: 1 });
+  for (let i = 0; i < 60 * 6; i++) c.step(1 / 60, { ocean });
+  const r1 = Math.abs(c.telemetry.yawRate);
+  console.log(`  满舵：漂流 ${r0.toFixed(2)}°/s，开正车 6 s 后 ${r1.toFixed(1)}°/s`);
+  assert.ok(r0 < 1.5 && r1 > 5 * Math.max(r0, 0.5), '正车滑流给舵效');
+});
+
+test('触底：冲上缓坡停住、撞上陡岸弹回不发散；深水里与不给地形逐位相同', () => {
+  const ny = (slope) => 1 / Math.hypot(1, slope);
+  const depthAlongNormal = (y, ground, slope) => {
+    // 接触点在地面以下的最大深度（沿法线）
+    const s = y.state, q = s.quaternion, { x, y: qy, z, w } = q;
+    const R = [1 - 2 * (qy * qy + z * z), 2 * (x * qy - w * z), 2 * (x * z + w * qy), 2 * (x * qy + w * z), 1 - 2 * (x * x + z * z), 2 * (qy * z - w * x), 2 * (x * z - w * qy), 2 * (qy * z + w * x), 1 - 2 * (x * x + qy * qy)];
+    let m = 0;
+    for (const c of y.contactPoints) {
+      const r = c.r, px = s.position.x + R[0] * r[0] + R[1] * r[1] + R[2] * r[2], py = s.position.y + R[3] * r[0] + R[4] * r[1] + R[5] * r[2], pz = s.position.z + R[6] * r[0] + R[7] * r[1] + R[8] * r[2];
+      m = Math.max(m, (ground(px, pz) - py) * ny(slope));
+    }
+    return m;
+  };
+  const finite = (y) => [y.state.position.x, y.state.position.y, y.state.velocity.x, y.state.velocity.y, y.state.quaternion.w, y.state.angularVelocity.y].every(Number.isFinite);
+  // 风从北来，船以真风角 90° 向东（+X）全速驶向一道岸坡：x > 40 后地面按 slope 升高
+  const run = (slope, kn, T) => {
+    const y = new SailingYacht(), wind = windOf(kn), ground = (x) => Math.min(5, -10 + Math.max(0, x - 40) * slope);
+    y.setControls({ mode: 'twa', target: 90 * DEG, tack: 'port' });
+    y.reset({ x: 0, yaw: Math.PI / 2, speed: 3 });
+    const r = { first: null, vIn: 0, vMinAfter: Infinity, rebound: 0, pen: 0, xmax: -Infinity, ok: true, heel: 0 };
+    for (let i = 0; i < 60 * T; i++) {
+      const vx0 = y.state.velocity.x;
+      y.step(1 / 60, { wind, ground });
+      if (!finite(y)) { r.ok = false; break; }
+      if (y.ground.contact && r.first === null) { r.first = y.time; r.vIn = vx0; }
+      if (r.first !== null && y.time < r.first + 5) { r.vMinAfter = Math.min(r.vMinAfter, Math.hypot(y.state.velocity.x, y.state.velocity.z)); r.rebound = Math.min(r.rebound, y.state.velocity.x); }
+      r.pen = Math.max(r.pen, depthAlongNormal(y, ground, slope)); r.xmax = Math.max(r.xmax, y.state.position.x); r.heel = Math.max(r.heel, Math.abs(y.telemetry.heel));
+    }
+    return r;
+  };
+  const a = run(0.25, 12, 45);      // 1:4 沙坡
+  console.log(`  1:4 坡：${(a.vIn / KN).toFixed(1)} kn 冲上去，5 s 内最低 ${a.vMinAfter.toFixed(2)} m/s，最远 x = ${a.xmax.toFixed(1)} m（水线在 x = 80），压入 ${(a.pen * 100).toFixed(1)} cm，最大横倾 ${a.heel.toFixed(0)}°`);
+  assert.ok(a.ok && a.first !== null, '应当触底且不出现 NaN');
+  assert.ok(a.vMinAfter < 0.3, '触底后停住');
+  assert.ok(a.xmax < 80, '没有冲上干岸');
+  assert.ok(a.pen < 0.15, '压入地面不超过 15 cm');
+  const b = run(3, 16, 25);         // 3:1 陡岸，船首直撞
+  console.log(`  3:1 陡岸：撞击 ${b.vIn.toFixed(2)} m/s，弹回 ${(-b.rebound).toFixed(2)} m/s，压入 ${(b.pen * 100).toFixed(1)} cm`);
+  assert.ok(b.ok && b.first !== null);
+  assert.ok(-b.rebound < 0.3 * b.vIn, '弹回速度远小于撞击速度（不会被弹飞）');
+  assert.ok(b.pen < 0.4, '压入陡岸不超过 40 cm');
+  // 瞬移进陆地（龙骨在地下 3.4 m）：被慢慢推出来
+  const c = new SailingYacht();
+  c.reset({ y: -1 });
+  let vmax = 0;
+  for (let i = 0; i < 60 * 15; i++) { c.step(1 / 60, { ground: () => 1 }); assert.ok(finite(c)); vmax = Math.max(vmax, Math.hypot(c.state.velocity.x, c.state.velocity.y, c.state.velocity.z)); }
+  assert.ok(vmax < 4, `被推出地面的速度 ${vmax}`);
+  // 深水（−36 m）：粗检跳过接触计算，结果与不给地形逐位相同
+  const wind = windOf(12), d = new SailingYacht(), e = new SailingYacht();
+  for (const s of [d, e]) { s.setControls({ mode: 'twa', target: 70 * DEG, tack: 'port' }); s.reset({ yaw: windFrom(wind) - 70 * DEG, speed: 3 }); }
+  for (let i = 0; i < 60 * 20; i++) { d.step(1 / 60, { wind }); e.step(1 / 60, { wind, ground: () => -36 }); }
+  assert.deepEqual(e.state, d.state);
+  assert.equal(e.ground.contact, false);
+});

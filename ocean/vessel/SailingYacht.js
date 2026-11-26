@@ -3,14 +3,15 @@
 //
 //   const yacht = new SailingYacht({ hull: YACHT_HULL });          // 与画面 new Sailboat({ hull: yacht.hull }) 同一组型线参数
 //   yacht.setControls({ mode: 'twa', target: 50 * Math.PI / 180, tack: 'port', sheet: 'auto' });
-//   yacht.step(dt, { ocean, wind: { x, z } });                     // wind = 10 m 高真风（U10，指向下风），内部 ≥ 120 Hz 子步
+//   yacht.step(dt, { ocean, wind: { x, z }, ground });             // wind = 10 m 高真风（U10，指向下风）；ground(x, z) 地面高度（可省略）；内部 ≥ 120 Hz 子步
 //   yacht.state / yacht.telemetry / yacht.events / yacht.wake / yacht.sail
 //
 // 力（全部在船体坐标、对重心）：
 //   重力；船体水压（静水力 + Froude–Krylov，三角面精确积分，Hydrostatics）；面元摩擦（ITTC-1957 × 1.05）；
 //   剩余阻力（DSYHS 2008，作用在水线面形心）；辐射阻尼（竖直相对速度，按升沉阻尼比标定）；砰击；
 //   龙骨、舵、船体三个升力面（Helmbold 斜率、失速、诱导阻力、下洗，Foils）；主帆、前帆（ORC 系数，各在自己的受力中心）；
-//   船体与桅杆受风阻力。附加质量（切片理论）按体坐标轴加到惯性上，随浸没程度缩放。
+//   船体与桅杆受风阻力；辅机推力（桨轴上，正车滑流冲舵）；触底时龙骨 / 舵 / 船体与地面的接触力。
+//   附加质量（切片理论）按体坐标轴加到惯性上，随浸没程度缩放。
 // 积分：半隐式欧拉（先速度后位置，辛积分），子步 h ≤ 1/120 s；四元数每步归一化。
 // 横倾、纵摇、升沉、速度饱和、漂角、上风舵、换舷时失速 —— 都由上面这些力的平衡得到，没有写死的极曲线或横倾表。
 // =====================================================================================
@@ -37,6 +38,42 @@ export const YACHT_DEFAULTS = Object.freeze({
   sailCoefficients: 'low', heelLimit: 20 * DEG,      // 自动调帆的横倾上限（巡航舒适性，VPP 常用 20–25°）
   substepHz: 120,
   position: { x: 0, z: 0 }, yaw: 0, speed: 0,
+  motor: null,                        // 辅机参数（见 MOTOR_DEFAULTS），null = 默认
+  groundContact: null,                // 触底接触参数（见 GROUND_DEFAULTS），null = 默认
+});
+
+/**
+ * 辅机（舷内柴油机 + 两叶定距桨）。推力 T = T₀·(m² − m·V_a/V_p)：m 为油门（0…1），V_a = (1 − w)·对水轴向速度，
+ * 即定距桨在定转速下 K_T 随进速系数 J 近似线性下降、在 V_a = m·V_p 处推力为零。倒车推力取正车的 reverse 倍。
+ * 推力沿船体纵轴作用在桨轴上（艉部船底下），所以加油门时船首略抬。正车时桨后滑流冲到舵上（动量理论：
+ * 远场增速 √(V_a² + 2T/(ρA)) − V_a），低速也有舵效。
+ */
+export const MOTOR_DEFAULTS = Object.freeze({
+  thrust: 1200,           // 系柱推力（N）：约 10 kW 柴油机配 0.36 m 两叶桨
+  reverse: 0.4,           // 倒车推力 / 正车推力（两叶定距桨倒车效率低）
+  pitchSpeed: 4.6,        // 推力降为零的进速（m/s，满油门）
+  wakeFraction: 0.15,     // 伴流分数 w
+  diameter: 0.36,         // 桨径（m）
+  washFraction: 0.3,      // 舵面在滑流里的比例
+  washDevelop: 0.8,       // 舵处滑流增速 / 远场增速
+  response: 0.5,          // 油门响应时间常数（s）
+  dragArea: 0,            // 停机时螺旋桨阻力的 C_D·A（m²）；0 = 折叠桨（默认，与没有辅机时完全相同）
+  position: null,         // 桨轴位置（船体坐标）；null = 站位 0.14 的船底下 0.25 m
+});
+
+/**
+ * 触底（龙骨、舵、船体与海底 / 岸坡的接触）：每个接触点是沿地形法线的弹簧阻尼（压入深度饱和），加正则化的库仑摩擦。
+ * 刚度按部件给出总量，平均分到该部件的接触点上（整条龙骨贴底时刚度正好是 keel，单点触底时更软）；
+ * 阻尼按单点的阻尼比给出。阻尼与摩擦的等效粘性系数按同时接触的点数限幅，120 Hz 子步下多少点接触都稳定。
+ */
+export const GROUND_DEFAULTS = Object.freeze({
+  stiffness: { keel: 3e6, rudder: 2e5, hull: 4e6 },       // 各部件总刚度（N/m）
+  dampingRatio: 0.7,      // 单点阻尼比（等效质量取半船质量）
+  friction: 0.45,         // 库仑摩擦系数（玻璃钢 / 铅对沙、礁石）
+  slipSpeed: 0.1,         // 摩擦正则化速度（m/s）：低于它摩擦按速度线性减小，避免静止时抖动
+  saturation: 0.5,        // 压入深度饱和（m）：瞬移进地形时不会被弹飞
+  margin: 1.0,            // 粗检余量（m）：所有接触点离地都超过它时本步跳过接触计算
+  maxLoad: 3,             // 弹簧力合力上限（× 船重）
 });
 
 /**
@@ -84,6 +121,8 @@ export class SailingYacht {
     this._buildMass();
     // —— 3. 翼型、帆装、阻力 ——
     this._buildFoils();
+    this._buildMotor();
+    this._buildContacts();
     this.rig = new Rig(rigFromLayout(L), { coefficients: o.sailCoefficients, rhoAir: o.rhoAir });
     this.residuary = new ResiduaryResistance(this.form, { rho: o.rho, g: G });
     // —— 4. 附加质量（切片理论）与辐射阻尼标定 ——
@@ -97,7 +136,7 @@ export class SailingYacht {
 
     // —— 控制 ——
     this.autopilot = new Autopilot();
-    this.controls = { sheet: 'auto', flat: 'auto', reef: 'auto', heelLimit: o.heelLimit };
+    this.controls = { sheet: 'auto', flat: 'auto', reef: 'auto', heelLimit: o.heelLimit, motor: 0 };
     this.substepHz = o.substepHz;
 
     // —— 输出对象（每步原地更新）——
@@ -106,7 +145,9 @@ export class SailingYacht {
     this.events = [];
     this._eventPool = Array.from({ length: 8 }, () => ({ type: 'slam', position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 0, z: 0 }, speed: 0, area: 0, areaRate: 0, intensity: 0 }));
     this.wake = { bow: { x: 0, y: 0, z: 0 }, stern: { x: 0, y: 0, z: 0 }, direction: { x: 0, z: 1 }, speed: 0, Fn: 0, kelvinAngle: Math.asin(1 / 3), angle: Math.asin(1 / 3), amplitude: 0, strength: 0 };
-    this.sail = { side: 1, boomAngle: 0.3, jibSheet: 0.3, luff: 0, fill: 1, aws: 0, awa: 0, reef: 1, flat: 1, awLocal: { x: 0, z: -1 } };
+    this.sail = { side: 1, boomAngle: 0.3, jibSheet: 0.3, luff: 0, fill: 1, aws: 0, awa: 0, reef: 1, flat: 1, awLocal: { x: 0, z: -1 }, rudder: 0 };
+    // 触底：本步是否接触、接触点数、法向力合力（N，子步平均）、新接触的最大入射速度、接触处的滑动速度、合力作用点（世界）
+    this.ground = { contact: false, points: 0, force: 0, impact: 0, slide: 0, position: { x: 0, y: 0, z: 0 }, normal: { x: 0, y: 1, z: 0 } };
 
     // —— 内部缓冲 ——
     this._R = new Float64Array(9); this._Ii = new Float64Array(9); this._Ia = new Float64Array(9);
@@ -215,6 +256,48 @@ export class SailingYacht {
     this.clrZ = foils.reduce((a, x) => a + x.liftArea * (x.ref[2] - 0.25 * x.chord), 0) / la;
   }
 
+  // ------------------------------------------------------------------ 辅机
+  _buildMotor() {
+    const p = this.hull, sh = this.shape;
+    const M = this.motor = { ...MOTOR_DEFAULTS, ...(this.options.motor || {}) };
+    // 桨轴默认在龙骨后缘与艉挂舵之间：站位 s = 0.14（离艉板约 1.2 m）、船底下 0.25 m（桨尖离船底约 7 cm）
+    if (!M.position) { const s = 0.14; M.position = [0, sh.keel(p, s) - 0.25, sh.zAt(p, s)]; }
+    M.discArea = Math.PI * (M.diameter / 2) ** 2;
+    this._motor = 0; this._thrust = 0; this._wash = 0;
+  }
+
+  // ------------------------------------------------------------------ 触底接触点
+  // 龙骨下缘与前后缘、舵的下半部、船体（中线龙骨线、两舷舭部、舷弧、船首柱）—— 都取在画面船体的轮廓上
+  _buildContacts() {
+    const p = this.hull, L = this.layout, sh = this.shape, GP = { ...GROUND_DEFAULTS, ...(this.options.groundContact || {}) };
+    GP.stiffness = { ...GROUND_DEFAULTS.stiffness, ...(GP.stiffness || {}) };
+    const pts = [], add = (group, x, y, z) => pts.push({ group, r: [x, y, z], k: 0, c: 0, on: false });
+    const sOf = (z) => clamp((z + p.length / 2) / p.length, 0, 1);
+    for (const [z, y] of L.keel.outline) if (y < sh.keel(p, sOf(z)) - 0.05) add('keel', 0, y, z);
+    for (let i = 1; i < 6; i++) add('keel', 0, L.keel.tipY, sh.zAt(p, 0.3 + 0.36 * i / 6));   // 下缘直线段补点
+    for (const [z, y] of L.rudder.outline) if (y < -0.3) add('rudder', 0, y, z);
+    for (let i = 0; i <= 12; i++) { const s = i / 12; add('hull', 0, sh.keel(p, s), sh.zAt(p, s)); }
+    for (let i = 1; i <= 9; i++) {
+      const s = i / 10, z = sh.zAt(p, s), [x, y] = sh.section(p, s, 0.95);                   // 舭部（θ ≈ 55°）
+      add('hull', x, y, z); add('hull', -x, y, z);
+    }
+    for (let i = 0; i <= 8; i++) {
+      const s = 0.02 + 0.96 * i / 8, z = sh.zAt(p, s), [x, y] = sh.section(p, s, Math.PI / 2);   // 舷弧
+      add('hull', x, y, z); add('hull', -x, y, z);
+    }
+    add('hull', 0, 0, sh.zAt(p, 1)); add('hull', 0, sh.sheer(p, 1), sh.zAt(p, 1));               // 船首柱
+    // 刚度按部件总量平均分到各点；阻尼按单点计（等效质量取半船质量），少数几点触底时也不会弹回去，
+    // 整个部件贴底时过阻尼（像压进沙里）；稳定性由 _groundContacts 里按接触点数的上限保证
+    const n = {}; for (const c of pts) n[c.group] = (n[c.group] || 0) + 1;
+    for (const c of pts) {
+      c.k = (GP.stiffness[c.group] ?? GP.stiffness.hull) / n[c.group];
+      c.c = 2 * GP.dampingRatio * Math.sqrt(c.k * this.mass / 2);
+    }
+    this.contactPoints = pts; this.groundParams = GP;
+    this._groundFn = null; this._groundOn = false; this._gPrevN = 0;
+    this._gacc = { n: 0, force: 0, fx: 0, fy: 0, fz: 0, nx: 0, ny: 0, nz: 0, slide: 0, impact: 0, points: 0 };
+  }
+
   // ------------------------------------------------------------------ 附加质量（切片理论）
   // 每个横剖面的二维高频附加质量：升沉按半圆等效 ρπB²/8（Lewis 1929，系数≈1），横荡按带水面镜像的平板 ρπT²/2，
   // 横摇（绕水线）ρπT⁴/16（Newman, Marine Hydrodynamics 1977，平板绕中心转动 ρπa⁴/8 的一半）；
@@ -278,6 +361,8 @@ export class SailingYacht {
     this._w = [0, 0, 0];
     this.integ._first = true; this.integ.etaMax = Infinity;
     this._awsF = null; this._trimTimer = 0; this._imm = 1; this._heel2 = heel * heel; this._limAdj = 0;
+    this._motor = 0; this._thrust = 0; this._wash = 0; this._groundOn = false;
+    if (this.contactPoints) { for (const c of this.contactPoints) c.on = false; this._clearGround(); }
     if (this.autopilot) { this.autopilot.rudder = 0; this.autopilot._int = 0; this.autopilot._turn = 0; }
     this._publish();
     return this;
@@ -287,6 +372,7 @@ export class SailingYacht {
    * 控制：
    *   mode 'twa'（target = 真风角大小，弧度，tack = 'port' | 'starboard'）| 'heading'（target = yaw，弧度）| 'manual'（rudder，弧度）
    *   sheet：'auto' 或 0（收紧）… 1（放松）；flat / reef：'auto' 或 0.5–1 / 0.45–1；heelLimit：自动调帆的横倾上限（弧度）
+   *   motor：辅机油门 −1（全速倒车）… 0（停机）… 1（全速正车）
    */
   setControls(c = {}) {
     const ap = this.autopilot;
@@ -294,7 +380,7 @@ export class SailingYacht {
     if (c.target !== undefined) ap.target = c.target;
     if (c.tack) ap.tack = c.tack;
     if (c.rudder !== undefined) ap.manualRudder = c.rudder;
-    for (const k of ['sheet', 'flat', 'reef', 'heelLimit']) if (c[k] !== undefined) this.controls[k] = c[k];
+    for (const k of ['sheet', 'flat', 'reef', 'heelLimit', 'motor']) if (c[k] !== undefined) this.controls[k] = c[k];
     return this;
   }
   /** 迎风换舷 / 顺风换舷（不传则按当前真风角自动判断） */
@@ -307,11 +393,16 @@ export class SailingYacht {
 
   /**
    * 推进 dt 秒。env：{ ocean（sampleHeight / sampleVelocity，可省略 = 平静水面）, wind: { x, z }（U10，指向下风）,
-   *                    waveNumber（Smith 效应波数 rad/m，可省略：取海况主波）}
+   *                    waveNumber（Smith 效应波数 rad/m，可省略：取海况主波）,
+   *                    ground（(x, z) => 地面高度 m，水下为负；或带 heightAt(x, z) 的对象；可省略 = 无限深）}
    */
   step(dt, env = {}) {
     dt = Math.min(Math.max(+dt || 0, 0), 0.25);
     if (dt === 0) return this;
+    const gr = env.ground;
+    this._groundFn = typeof gr === 'function' ? gr : (gr && typeof gr.heightAt === 'function' ? (x, z) => gr.heightAt(x, z) : null);
+    this._groundOn = this._groundFn ? this._groundBroadPhase(dt) : false;
+    this._clearGround();
     const ocean = env.ocean || null;
     const ready = !!ocean && typeof ocean.sampleHeight === 'function' && !(ocean.sim && ocean.sim.ready === false);
     const W = this._water;
@@ -368,6 +459,79 @@ export class SailingYacht {
       f.W0[k] = m[k] / n; f.Gx[k] = g1 * fx + g2 * px; f.Gz[k] = g1 * fz + g2 * pz;
     }
     this._water.field = f;
+  }
+
+  // ------------------------------------------------------------------ 触底
+  // 粗检：本步开始时所有接触点离地都超过余量（含本步可能的位移）就整步跳过 —— 深水里没有任何额外开销
+  _groundBroadPhase(dt) {
+    const g = this._groundFn, R = quatToMat(this._q, this._R), x = this._x, cg = this.cg;
+    const margin = this.groundParams.margin + 2 * Math.hypot(this._v[0], this._v[1], this._v[2]) * dt;
+    let near = false;
+    for (const c of this.contactPoints) {
+      const r = c.r, rx = r[0] - cg[0], ry = r[1] - cg[1], rz = r[2] - cg[2];
+      const px = x[0] + R[0] * rx + R[1] * ry + R[2] * rz, py = x[1] + R[3] * rx + R[4] * ry + R[5] * rz, pz = x[2] + R[6] * rx + R[7] * ry + R[8] * rz;
+      const h = g(px, pz);
+      if (Number.isFinite(h) && py - h < margin) { near = true; break; }
+    }
+    if (!near) for (const c of this.contactPoints) c.on = false;
+    return near;
+  }
+
+  _clearGround() {
+    const a = this._gacc;
+    a.n = 0; a.force = 0; a.fx = 0; a.fy = 0; a.fz = 0; a.nx = 0; a.ny = 0; a.nz = 0; a.slide = 0; a.impact = 0; a.points = 0;
+  }
+
+  // 每个子步：接触点在地面以下时，沿地形法线的弹簧阻尼（压入深度饱和）+ 正则化库仑摩擦；力换到船体坐标交给 addF。
+  // · 弹簧力合力不超过 maxLoad·m·g（瞬移进地形时按比例缩小，船被慢慢推出来而不是弹飞）
+  // · 显式积分的阻尼、摩擦都相当于粘性系数 c，c·h/m 超过 2 就发散：按上一子步的接触点数把每点的 c 限制在
+  //   0.5·m/(n·h) 以内（一个子步里阻尼、摩擦最多抵消一半的相对速度），多少点同时接触都稳定
+  _groundContacts(R, addF, h) {
+    const g = this._groundFn, cg = this.cg, x = this._x, v = this._v, w = this._w, GP = this.groundParams, a = this._gacc;
+    const DS = GP.saturation, MU = GP.friction, VE = GP.slipSpeed, e = 0.4;
+    const buf = this._gbuf || (this._gbuf = new Float64Array(this.contactPoints.length * 12));
+    const cMax = 0.5 * this.mass / (Math.max(1, this._gPrevN || 0) * h);
+    let n = 0, sum = 0;
+    a.n++;
+    // 第一遍：哪些点压进了地面，弹簧力多大
+    for (let i = 0; i < this.contactPoints.length; i++) {
+      const c = this.contactPoints[i], r = c.r, rx = r[0] - cg[0], ry = r[1] - cg[1], rz = r[2] - cg[2];
+      const ax = R[0] * rx + R[1] * ry + R[2] * rz, ay = R[3] * rx + R[4] * ry + R[5] * rz, az = R[6] * rx + R[7] * ry + R[8] * rz;
+      const px = x[0] + ax, py = x[1] + ay, pz = x[2] + az;
+      const gh = g(px, pz);
+      const d = Number.isFinite(gh) ? gh - py : -1;
+      if (d <= 0) { c.on = false; continue; }
+      // 地形法线（中心差分），坡度不可用时按水平地面
+      let gx = (g(px + e, pz) - g(px - e, pz)) / (2 * e), gz = (g(px, pz + e) - g(px, pz - e)) / (2 * e);
+      if (!Number.isFinite(gx)) gx = 0;
+      if (!Number.isFinite(gz)) gz = 0;
+      const nl = 1 / Math.sqrt(gx * gx + 1 + gz * gz), nx = -gx * nl, ny = nl, nz = -gz * nl;
+      const Fs = c.k * DS * Math.tanh(d * ny / DS);           // d·n_y：沿法线的压入深度（局部平面近似）
+      const vx = v[0] + w[1] * az - w[2] * ay, vy = v[1] + w[2] * ax - w[0] * az, vz = v[2] + w[0] * ay - w[1] * ax;
+      const o = n * 12;
+      buf[o] = i; buf[o + 1] = px; buf[o + 2] = py; buf[o + 3] = pz; buf[o + 4] = nx; buf[o + 5] = ny; buf[o + 6] = nz;
+      buf[o + 7] = vx; buf[o + 8] = vy; buf[o + 9] = vz; buf[o + 10] = Fs;
+      sum += Fs; n++;
+    }
+    const scale = Math.min(1, GP.maxLoad * this.mass * G / Math.max(sum, 1e-9));
+    // 第二遍：法向力（弹簧 + 阻尼，只推不拉）与摩擦
+    for (let j = 0; j < n; j++) {
+      const o = j * 12, c = this.contactPoints[buf[o]], r = c.r;
+      const px = buf[o + 1], py = buf[o + 2], pz = buf[o + 3], nx = buf[o + 4], ny = buf[o + 5], nz = buf[o + 6];
+      const vx = buf[o + 7], vy = buf[o + 8], vz = buf[o + 9];
+      const vn = vx * nx + vy * ny + vz * nz;
+      const Fn = buf[o + 10] * scale - Math.min(c.c, cMax) * clamp(vn, -3, 3);
+      if (!(Fn > 0)) { c.on = true; continue; }               // 正在分开：不拉住
+      if (!c.on && -vn > a.impact) a.impact = -vn;            // 新接触的入射速度
+      c.on = true;
+      const tx = vx - vn * nx, ty = vy - vn * ny, tz = vz - vn * nz, vt = Math.hypot(tx, ty, tz);
+      const kf = -Math.min(MU * Fn / Math.sqrt(vt * vt + VE * VE), cMax);
+      const Fx = Fn * nx + kf * tx, Fy = Fn * ny + kf * ty, Fz = Fn * nz + kf * tz;
+      addF(R[0] * Fx + R[3] * Fy + R[6] * Fz, R[1] * Fx + R[4] * Fy + R[7] * Fz, R[2] * Fx + R[5] * Fy + R[8] * Fz, r[0], r[1], r[2]);
+      a.force += Fn; a.fx += Fn * px; a.fy += Fn * py; a.fz += Fn * pz; a.nx += Fn * nx; a.ny += Fn * ny; a.nz += Fn * nz; a.slide += Fn * vt;
+    }
+    this._gPrevN = n;
+    if (n > a.points) a.points = n;
   }
 
   _waterVel(x, y, z, out) {
@@ -438,9 +602,32 @@ export class SailingYacht {
     this._relVelBody(Hf.cp0, t);
     Hf.evaluate(t[0], t[2], 0, 0, immHull, this.rho);
     addF(Hf.out.fx, 0, Hf.out.fz, Hf.out.px, Hf.out.py, Hf.out.pz);
+    // —— 2b. 辅机：桨轴上沿船体纵轴的推力；正车滑流冲到舵上 ——
+    const Mo = this.motor, mCmd = clamp(+this.controls.motor || 0, -1, 1);
+    if (mCmd !== 0 || this._motor !== 0 || Mo.dragArea > 0) {
+      this._motor += (mCmd - this._motor) * Math.min(1, h / Mo.response);
+      if (Math.abs(this._motor) < 1e-5 && mCmd === 0) this._motor = 0;
+      const thr = this._motor, mp = Mo.position;
+      this._relVelBody(mp, t);
+      const Va = t[2] * (1 - Mo.wakeFraction);                 // 进速（> 0 前进）
+      let thrust = 0;
+      if (thr > 0) thrust = Mo.thrust * clamp(thr * thr - thr * Va / Mo.pitchSpeed, 0, 1.25 * thr * thr);
+      else if (thr < 0) thrust = -Mo.reverse * Mo.thrust * clamp(thr * thr - thr * Va / (0.8 * Mo.pitchSpeed), 0, 1.25 * thr * thr);   // 倒车：后退进速 −V_a 越大推力越小
+      if (thr === 0 && Mo.dragArea > 0) thrust = -0.5 * this.rho * Mo.dragArea * Math.abs(Va) * Va;   // 停机的桨：形状阻力
+      if (thrust !== 0) addF(0, 0, thrust, mp[0], mp[1], mp[2]);
+      this._thrust = thrust;
+      const Vp = Math.max(Va, 0);
+      this._wash = thrust > 0 ? Mo.washDevelop * (Math.sqrt(Vp * Vp + 2 * thrust / (this.rho * Mo.discArea)) - Vp) : 0;
+      acc.thrust += thrust;
+    } else { this._thrust = 0; this._wash = 0; }
     const delta = this.autopilot.rudder;
     const eps = K.out.cl / (Math.PI * K.arEff) * smoothstep(0.05, 0.3, Vh);   // 龙骨下洗（低速时尾流不成形）
     this._relVelBody(Rf.cp0, t);
+    if (this._wash > 0) {
+      // 舵面的 washFraction 在滑流里：按动压加权的等效轴向来流
+      const u = this._wash, f = Mo.washFraction, t2 = t[2];
+      t[2] = t2 >= 0 ? Math.sqrt(t2 * t2 + f * u * (2 * t2 + u)) : t2 + Math.sqrt(f) * u;
+    }
     Rf.evaluate(t[0], t[2], delta, eps, immApp, this.rho);
     addF(Rf.out.fx, 0, Rf.out.fz, Rf.out.px, Rf.out.py, Rf.out.pz);
     // —— 3. 剩余（兴波）阻力：DSYHS，作用在水线面形心、水线下 0.3 Tc，方向与相对水流相反 ——
@@ -477,6 +664,8 @@ export class SailingYacht {
     }
     // —— 5. 重力 ——
     Fx -= m * G * R[3]; Fy -= m * G * R[4]; Fz -= m * G * R[5];
+    // —— 5b. 触底（龙骨、舵、船体与地面的接触）——
+    if (this._groundOn) this._groundContacts(R, addF, h);
     // —— 6. 控制（舵机每子步，调帆 4 Hz）——
     const yaw = Math.atan2(R[2], R[8]);
     const windFromYaw = Math.atan2(-this._wind.x, -this._wind.z);
@@ -561,7 +750,7 @@ export class SailingYacht {
 
   _clearAcc() {
     const a = this._acc;
-    for (const k of ['n', 'Rf', 'Rr', 'Rw', 'Ri', 'Ra', 'Rd', 'drive', 'side', 'hm', 'rm', 'disp', 'wet', 'wetHull', 'wp', 'keelSide', 'rudSide', 'hullSide']) a[k] = 0;
+    for (const k of ['n', 'Rf', 'Rr', 'Rw', 'Ri', 'Ra', 'Rd', 'drive', 'side', 'hm', 'rm', 'disp', 'wet', 'wetHull', 'wp', 'keelSide', 'rudSide', 'hullSide', 'thrust']) a[k] = 0;
   }
 
   // ------------------------------------------------------------------ 输出
@@ -614,12 +803,23 @@ export class SailingYacht {
       wettedArea: sm('wet', acc.n ? acc.wet / an : this._wetHull0 + this._wetApp0), wettedAreaHull: sm('wetH', acc.n ? acc.wetHull / an : this._wetHull0),
       waterplaneArea: sm('wp', acc.n ? acc.wp / an : this.waterplaneArea),
       substeps: n, autopilot: this.autopilot.mode, turning: this.autopilot.turning,
+      motor: this._motor, thrust: sm('thrust', n > 0 ? acc.thrust / an : 0),
     });
+    // —— 触底 ——
+    const Gd = this.ground, ga = this._gacc, gn = Math.max(1, ga.n);
+    Gd.contact = ga.points > 0; Gd.points = ga.points; Gd.force = ga.force / gn; Gd.impact = ga.impact;
+    Gd.slide = ga.force > 0 ? ga.slide / ga.force : 0;
+    if (ga.force > 0) {
+      Gd.position.x = ga.fx / ga.force; Gd.position.y = ga.fy / ga.force; Gd.position.z = ga.fz / ga.force;
+      const nl = Math.hypot(ga.nx, ga.ny, ga.nz) || 1; Gd.normal.x = ga.nx / nl; Gd.normal.y = ga.ny / nl; Gd.normal.z = ga.nz / nl;
+    }
+    T.grounded = Gd.contact; T.groundForce = Gd.force; T.groundContacts = Gd.points;
     // —— 帆的外观状态 ——
     const S = this.sail;
     S.side = rig.side; S.boomAngle = rig.side * st.boom; S.jibSheet = clamp((st.jibAngle - 0.12) / 0.75, 0, 1);
     S.luff = st.luff; S.fill = st.fill; S.aws = st.aws; S.awa = st.beta; S.reef = rig.reef; S.flat = rig.flat;
     const al = Math.hypot(at[0], at[2]) || 1; S.awLocal.x = at[0]; S.awLocal.z = at[2]; S.awLocal.len = al;
+    S.rudder = this.autopilot.rudder;
     // —— 砰击 / 飞溅事件 ——
     this.events.length = 0;
     if (n > 0) {

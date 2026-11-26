@@ -322,7 +322,10 @@ export class Sailboat {
     rud.lineTo(zStern - 0.18, sAt(0) - 0.15);
     const rudGeo = new THREE.ExtrudeGeometry(rud, { depth: 0.06, bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.015, bevelSegments: 2, curveSegments: 8 });
     rudGeo.rotateY(-Math.PI / 2); rudGeo.translate(0.03, 0, 0);
-    add(withSheer(rudGeo), hullMat);
+    // 舵绕舵杆（艉板后 2 cm 的竖直线）转动：applyPhysics 收到 rudder（弧度，+ = 后缘偏向左舷 +X）时跟着转
+    this.rudderPivot = new THREE.Group(); this.rudderPivot.position.set(0, 0, zStern - 0.02); M.add(this.rudderPivot);
+    rudGeo.translate(0, 0, -(zStern - 0.02));
+    add(withSheer(rudGeo), hullMat, { parent: this.rudderPivot });
 
     // —— 护舷木条（沿舷弧，左右 + 艉部）——
     const railPts = (sx) => { const pts = []; for (let i = 0; i <= 24; i++) { const s = 0.005 + i / 24 * 0.985; pts.push(new THREE.Vector3(sx * bAt(s) * 0.995, sAt(s) + 0.035, zAt(s))); } return pts; };
@@ -561,11 +564,12 @@ export class Sailboat {
   /**
    * 由船体物理（ocean/vessel 的 SailingYacht.sail）直接驱动帆的外观，代替 update 里的经验调帆与横倾。
    *   s = { side（+1：帆在 +X 左舷）, boomAngle（弧度，带符号，+ 为横杆甩向 +X）, jibSheet 0–1, luff 0–1, fill 0–1,
-   *         awLocal: { x, z }（船体坐标里桅顶处视风的去向，m/s）, aws }
+   *         awLocal: { x, z }（船体坐标里桅顶处视风的去向，m/s）, aws, rudder（舵角，弧度，+ = 后缘偏向 +X；可省略）}
    *   船的位置、姿态（含横倾、纵摇）由调用者写在 group 上（见 ocean/vessel/three-adapter.js 的 applyToThree）。
    */
   applyPhysics(dt = 0, s = {}, { time, sky } = {}) {
     this._time = time !== undefined ? time : this._time + (dt || 0);
+    if (s.rudder !== undefined) this.rudderPivot.rotation.y = -s.rudder;
     if (sky) {
       const u = this.sailMaterial.uniforms;
       u.uKeyDir.value.copy(sky.keyLightDirection); u.uKeyColor.value.copy(sky.keyLightColor); u.uAmb.value.copy(sky.ambientColor);

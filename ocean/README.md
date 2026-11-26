@@ -21,6 +21,7 @@ ocean/
   Spray.js             飞沫粒子（运动模糊条）+ 浪尖飞沫发射器（可选）
   droplets.js          水滴动力学与近海面风廓线（纯 JS）
   extras/Sailboat.js   参数化船体与单桅帆船的画面（可选）
+  extras/BowWave.js    船首浪：按傅汝德数破碎，往白浪场注入泡沫、甩出水片（配合 vessel，可选）
   vessel/              帆船动力学：六自由度刚体，船体水压积分、阻力、龙骨 / 舵 / 帆的力（可选，见 vessel/README.md）
 ```
 
@@ -135,6 +136,8 @@ buoy.update(dt, ocean, { heel: 0 });
 | 在浪峰上、偏前坡 | 两级合成高度 > 约 −0.6σ 才起，最强在浪峰之上；沿传播方向下降的一侧（前坡）权重 1，后坡 0.35 | 白浪在浪峰前坡翻滚；长浪峰上的短波更陡、更易破碎（调制） |
 | 沿浪峰分段 | 噪声按主浪群速度移动，破碎集中在波群能量最大处，一段几米长 | 破碎由波群聚焦触发；实测破碎峰线长度分布（Kleiss & Melville 2010；Romero 2019） |
 | 只看 > 4 m 的波 | 最细一级（< 4 m）的极短波挤压得厉害，但那是不带气泡的微破碎，看不见 | — |
+| 浅水（有水深图时） | 水深 h 处的最大浪高 Hb = γh（γ = 0.78）；按瑞利分布，浪高超过 Hb 的比例 Qb = exp(−(γh / Hrms)²)，在入射浪的浪峰前坡上按 Qb 起破碎。碎浪随浪峰一排排推向岸边，残留泡沫照常衰减、漂流；陆地上清零 | 随机浪的浅水破碎：Battjes & Janssen (1978)；Thornton & Guza (1983)；γ 取 McCowan (1894) 孤立波极限 |
+| 外部泡沫源 | `ocean.addFoam(x, z, 半径, 比例)` 在世界坐标注入活跃白浪（每帧最多 16 个），之后与白浪一样衰减、漂流。船首浪（`extras/BowWave`）就用它 | — |
 
 唯一的常数是临界值 J_c = 0.725（`params.breakingThreshold`）：局部水平压缩超过约 28% 的浪峰破碎。它在 8、12、20 m/s 充分发展海况下各标定一次，三处要求的值几乎相同（0.72、0.71、0.745），所以取成与风速无关的物理常数。覆盖率由海况自然得出，风越大、浪越陡，白浪越多，与观测的对比见下文验证。需要严格对齐经验曲线时，可设 `params.autoWhitecaps = true`：覆盖率（3 s 平均）对 Monahan & O'Muircheartaigh (1980) 的 W = 3.84×10⁻⁶·U^3.41 做慢速对数积分校准，闭环时间常数约 6 s。破碎在哪里发生、持续多久、留下什么，都由过程决定，不靠这个常数。
 
@@ -149,23 +152,24 @@ buoy.update(dt, ocean, { heel: 0 });
 
 - **A（stage A）**：正在破碎的浪峰。水块被浪峰扫过后 A 以 τA 衰减，所以白浪在浪峰后面拖一段 c·τA 长的尾巴（10 m/s 的浪约 5 m）。
 - **B（stage B）**：破碎停止后留在水面的泡沫斑。τA、τB 取 Monahan & Lu (1990) 的 0.53 s、3.85 s。B 与 A 的面积比是过程算出来的，没有写死。
-- **C**：B 消退后残下的薄泡沫与表面膜。只在大风时有量（比例随风速 7–18 m/s 从 0 升到 0.2，寿命 6–30 s）。C 被朗缪尔环流平流：表面辐合约 0.6% U10、辐合线上的顺风射流约 0.8% U10、线距 3–10 m，线弯曲、断续、Y 形汇合。半拉格朗日平流加面密度守恒（辐合处变浓）。十几秒就聚成沿风向的细条，就是蒲福 7–9 级描述里“沿风向成条的泡沫”。
+- **C**：B 消退后残下的薄泡沫与表面膜。只在大风时有量（比例随风速 7–18 m/s 从 0 升到 0.35，寿命 8–40 s；NOAA 8–9 级照片里沿风向的泡沫条纹占了海面相当一部分）。C 被朗缪尔环流平流：表面辐合约 0.6% U10、辐合线上的顺风射流约 0.8% U10、线距 3–10 m，线弯曲、断续、Y 形汇合。半拉格朗日平流加面密度守恒（辐合处变浓）。十几秒就聚成沿风向的细条，就是蒲福 7–9 级描述里“沿风向成条的泡沫”。
 - **漂流**：整张图随表面漂流（Stokes 漂流 + 风生流，约 3% U10）平移。海面位移按未位移的参考位置存储，泡沫自动随轨道运动前后摆动，在浪峰处被挤密。
-- **照片法覆盖率** f = min(1, A + B)：与 Monahan 的定义一致，含活跃与残留，不含很薄的 C。
+- **新鲜度示踪 F**（第四个通道）：与 B 同源（都来自 A 的衰减），但按 τB/2 衰减，所以 F/B = e^(−年龄/τB)。两个面积比例之比在 mip 平均、远近取样时都不变，着色器用它决定残留泡沫的亮度和透明度。
+- **照片法覆盖率** f = min(1, A + B)（`foam.stats.coverage`）：与 Monahan 的定义一致，含活跃与残留，不含很薄的 C。
 
 ### 3. 泡沫的光学
 
 | 类别 | 反照率 | 不透明度 | 图案 |
 |---|---|---|---|
 | A 新鲜白浪 | 0.55（Whitlock 等 1982；Koepke 1984） | 1 | 团块 + 细碎气泡 |
-| B 残留泡沫筏 | 0.4；斑块里约一半是空洞，整块平均约 0.2，与 Koepke (1984) 的有效反照率 0.22 相符 | 0.85 | Worley 网状花边 |
-| C 泡沫丝 | 0.25 | 0.5 | 沿风向拉长 8 倍的细丝 |
+| B 残留泡沫筏 | 新鲜时 0.4，随年龄（F/B）降到 0.18；斑块里约一半是空洞，按寿命平均与 Koepke (1984) 的有效反照率 0.22 相符 | 0.9 → 0.45 | Worley 网状花边 |
+| C 泡沫丝 | 0.25 | 0.5 | 沿风向拉长约 7 倍的细丝，再按三层不同尺度（9、23、45 m）的噪声弯曲：实拍里泡沫条纹是弯曲、分叉、断续的“大理石纹”，不是直线 |
 
 - **覆盖率严格守恒**：泡沫纹理三个通道都按秩均衡成 [0,1] 上的均匀分布，着色器取“图案值 > 1 − f”画出面积比例为 f 的泡沫，画面覆盖率就等于模拟值。两层不同尺度的图案用加权和的分布函数映射回均匀分布。图案细于像素时直接按比例 f 混合，期望值处处相同。
 - **光谱**：泡沫反射率随波长略降（Frouin 等 1996），颜色 (0.9, 0.96, 1.0)。
 - **气泡云**：A、B 下方的气泡云散射增亮水体（青绿色）。
 - **抑制毛细波**：残留泡沫与表面膜处毛细波被抑制（油膜效应，Alpers & Hühnerfuss 1989），那里更光滑、闪光更少。
-- **远处**：白浪场的 mipmap 就是面积平均，远处自然变成按比例混合。白浪场范围外用全场平均比例 × 主浪浪峰调制（1 + 0.9·η/σ，均值约 1）。
+- **远处**：白浪场的 mipmap 就是面积平均，像素比白浪大时自然变成按比例混合。白浪场范围外（> 256 m）的海面上，实拍里的白浪仍是一个个亮点（“白马”），不是一层灰，所以改用统计白浪：海面分成格子，每格每个寿命周期（τA + τB）以概率 p = f·格面积 / 有效面积出现一块沿浪峰拉长的白浪（尺度 0.45·λb，2–12 m），由亮转淡后在格内换位置重生。一块白浪按寿命平均的有效面积是 0.315·尺度²（形状 × (1 − 相位²) 的数值积分，`FAR_CAP_AREA`），期望覆盖率因此等于近处实测的 f；f 再乘主浪浪峰调制（1 + 0.9·η/σ，σ = Hs/4，均值约 1）。白浪会伸出自己的格子，所以取最近的 2×2 格。白浪小于像素时退回平均值 f，远处不闪。
 
 ### 4. 飞沫（Spray、SpumeEmitter、droplets）
 
@@ -197,7 +201,8 @@ buoy.update(dt, ocean, { heel: 0 });
 
 - 破碎判据基于线性叠加的海面，没有非线性波群聚焦，所以临界值 J_c 需要按观测标定一次（之后与风速无关）。能量通量判据（B ≈ 0.85）需要相速度和水质点速度场，线性 FFT 海面不能直接给出。
 - 朗缪尔环流是参数化的速度场，不是从 Craik–Leibovich 方程解出来的。
-- 白浪场只覆盖相机周围 512 m；更远处是统计意义上的平均。
+- 白浪场只覆盖相机周围 512 m；更远处是统计白浪（期望覆盖率一致，但不跟真实浪峰对齐）。
+- 浅水破碎用的是深水 Hrms，没有算浅化与折射：FFT 海面是均匀水深的线性波，岸边浪峰不会转向与岸平行。
 
 ## 四、海面着色（OceanMaterial）
 
@@ -210,7 +215,7 @@ buoy.update(dt, ocean, { heel: 0 });
 | 反射 | 精确 Fresnel（n = 1.333）+ Karis 环境 BRDF：粗糙表面在掠射角反射率下降，远处海面不会成一面白镜子；天空立方体按粗糙度取 mip；可叠平面反射 |
 | 太阳 / 月亮 | GGX + Smith 相关可见度，α 下限为太阳视半径，HDR 限幅 |
 | 水体 | Atlas（GDC 2019）散射：浪尖背光透射 k1（逆光时浪尖透出青绿）、视线散射 k2、受光面 k3、天光；白浪下方气泡云增亮 |
-| 泡沫 | 白浪场的 A / B / C 三类面积比例，各按实测反照率和不透明度画（见上节）；尾迹、岸线泡沫按残留泡沫画，越浓越接近新鲜白浪的亮度 |
+| 泡沫 | 白浪场的 A / B / C 三类面积比例，各按实测反照率和不透明度画（见上节）；尾迹按残留泡沫画，越浓越接近新鲜白浪的亮度。岸边碎浪来自白浪场的浅水破碎，着色器只在水线处加一圈很窄的冲流泡沫 |
 | 远处 | 雾色取天空立方体在视线方位的地平线颜色 + 朝太阳的米氏散射，海天无缝 |
 | 夜晚 | 尾迹和碎浪发蓝光（夜光藻，强度随 `SkyEnvironment.night`） |
 
@@ -231,7 +236,7 @@ new Ocean(renderer, { quality = 'high', model?, sea = {...WindSeaModel 选项}, 
 | `mesh` | 加到场景里的海面（frustumCulled = false，renderOrder = 10） |
 | `model` | WindSeaModel 实例 |
 | `sim` | OceanSimulation 实例 |
-| `foam` | FoamField 实例（`stats`：全图平均的 active / residual / lace / coverage） |
+| `foam` | FoamField 实例（`stats`：全图平均的 active / residual / lace / coverage / fresh） |
 | `params` | `choppiness`、`foamAmount`、`breakingThreshold`（破碎临界 J，默认 0.725）、`autoWhitecaps`（按 Monahan 校准，默认关）、`whitecapScale`、`foamLifetime`（残留泡沫寿命倍数）、`gustiness`、`fogDensity`（null = 跟随天空）、`mie`、`envIntensity`、`biolumination` |
 | `update(dt, camera, light)` | 每帧调用；light 可直接传 SkyEnvironment |
 | `warmup(seconds, camera, light)` | 异步；不渲染连续推进，切镜头后让泡沫与阈值先到稳态 |
@@ -242,7 +247,8 @@ new Ocean(renderer, { quality = 'high', model?, sea = {...WindSeaModel 选项}, 
 | `dominantWave` | 主浪的 `dir`（Vector2）、相速度 `c`、角频率 `omega` |
 | `readout` | 见上文 |
 | `setWake(texture, rect)` | 尾迹（R 泡沫、G 波脊；rect = minX, minZ, sizeX, sizeZ） |
-| `setBathymetry(texture, rect)` | 水深（R = 地面高度，水下为负），开启浅滩颜色、岸线泡沫、浅水消波 |
+| `setBathymetry(texture, rect)` | 水深（R = 地面高度，水下为负），开启浅滩颜色、浅水破碎（碎浪）、水线冲流泡沫、浅水消波 |
+| `addFoam(x, z, radius, amount)` | 本帧在世界坐标加一个泡沫源（半径 m，活跃白浪面积比例 0–1），之后与白浪一样衰减、漂流；每帧最多 16 个 |
 | `setReflection(texture, matrix, strength)` | 平面反射（alpha 标记有物体处） |
 | `setQuality(q)` | `ultra` / `high` / `medium` / `low` |
 | `resetWhitecaps()` | 风况突变后清空白浪场（自动校准时阈值从常数重新开始） |
@@ -276,6 +282,7 @@ buoy.update(dt, ocean, { heel })   // object 的 x、z、rotation.y 由外部控
 | `Spray({ max = 4000, exposure = 1/60 })` | `scene.add(spray.object)`；`emit(pos, vel, size, life, opacity, radius)`（radius = 水滴半径 m，0 = 水团）；`update(dt, { keyLightDirection, keyLightColor, ambientColor, wind, waterHeight })`。运动模糊条，逆光时前向散射发亮 |
 | `SpumeEmitter(spray, { rate, maxRate, radius })` | 每帧 `update(dt, ocean, camera)`：从正在破碎的浪峰撕下飞沫 |
 | `droplets.js` | `airSeaRoughness(U10)`、`windAtHeight(U10, z)`、`relaxationTime(r, vrel)`、`stepDroplet(v, r, air, dt)` |
+| `extras/BowWave(yacht, { ocean, spray, rate = 1, onset = 0.22, full = 0.42 })` | 每帧在 `yacht.step` 之后 `update(dt)`。船首驻点水头 ζ = V²/2g 给出船首浪尺度；傅汝德数从 `onset` 到 `full` 船首浪由不破碎到明显溢出破碎，在两舷紧贴船壳的窄带里注入泡沫（实拍里宽 0.3–0.8 m），下风舷（横倾浸深的一舷）更强；破碎时从驻点附近甩出毫米级水片，之后由 Spray 的阻力 + 重力决定轨迹。`intensity`（0–1）可给声音用 |
 | `extras/Sailboat({ hull, mastHeight, sky })` | 原点在水线中心，船首 +Z、左舷 +X；`floatPoints`（给 Buoyancy）、`bowPoint`、`dims`；`update(dt, { apparentWind, heel, time })` 返回 `heelTarget`（桅顶倒向 +X 为正，喂给 Buoyancy 时取负）。`buildHull(params)` 可单独生成参数化船体 |
 
 ## 六、画质与性能
@@ -305,6 +312,8 @@ buoy.update(dt, ocean, { heel })   // object 的 x、z、rotation.y 由外部控
 12. **软件渲染下的命令积压**：无显卡时 GPU 远慢于 JS，测试脚本连续推进几百步会积压几十秒的命令，截图超时。每几步同步读一个像素。
 13. **方向分布不要用 atan**：k 落在坐标轴上时 −k 的分量是 −0.0，有的 GPU 上 `atan(−0.0, x<0)` 结果不对，镜像波数的能量算错，厄米对称被破坏，打包在同一个复数场里的两个实数场互相串扰。风正好沿坐标轴时，高度会以约 15% 的幅度漏进 ∂Dx/∂z，雅可比出现假的重尾，白浪判据全错。改用 cos²(Δθ/2) = (1 + k̂·θ̂)/2。`fft-check` 里专门测了风沿坐标轴时波谱纹理的厄米对称。
 14. **海况突变后要丢掉旧回读**：水质点速度 = 两次回读的位移差 / 时间差。切镜头时一份回读还是旧海面（例如 11 m 的风暴浪），差分出几十 m/s 的“水流”，船被打转、倒着走。`Ocean.resetSea()` 让在途的回读作废、从头积累。
+15. **统计白浪的有效面积要积分出来**：远处白浪的出现概率按“一块白浪的面积”算，最初凭形状估成 0.55·尺度²，实际按形状和由亮转淡积分只有 0.315·尺度²，远处覆盖率只有近处的 57%。另外白浪会伸出自己的格子，只算本格时会被格子边切成直边；改取最近的 2×2 格。
+16. **不要用面积比例当“年龄”**：残留泡沫的比例 B 按 τB 衰减，看起来正好当年龄用，但 mip 把远处的小斑块平均成低比例，新鲜泡沫在远处被当成老泡沫画暗，中远景的白浪几乎看不见。改成单独的示踪量 F（τB/2 衰减），用 F/B 当年龄：两个面积比例之比不随平均改变。
 
 ## 参考
 
@@ -325,3 +334,6 @@ buoy.update(dt, ocean, { heel })   // object 的 x、z、rotation.y 由外部控
 - 近海面风：Charnock (1955)；Wu (1982) JGR 87 拖曳系数
 - 覆盖率的离散：Anguelova & Webster (2006) JGR 111, Whitecap coverage from satellite measurements
 - 朗缪尔环流：Leibovich (1983) Annual Review of Fluid Mechanics 15；Thorpe (2004) Annual Review of Fluid Mechanics 36
+- 浅水破碎：Battjes & Janssen (1978) Proc. 16th Coastal Engineering Conf., Energy loss and set-up due to breaking of random waves；Thornton & Guza (1983) JGR 88, Transformation of wave height distribution；McCowan (1894) Phil. Mag. 38（H/h ≈ 0.78）
+- 船首浪：Noblesse, Delhommeau, Guilbaud, Hendrix & Yang (2008) JFM 600, Simple analytical relations for ship bow waves（船首浪高按 V²/g 标度）
+- 实拍对照：NOAA / 美国国家气象局蒲福风级照片（公有领域，见 `tests/compare/`）；Callaghan & White (2009) JTECH 26（照片自动提取白浪）；Bakhoday-Paskyabi, Reuder & Flügge (2016) Methods in Oceanography 17（浮标相机白浪识别）；Lewis (ed., 1989) Principles of Naval Architecture Vol. III（遭遇频率）

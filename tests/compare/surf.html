@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>岸边碎浪对照渲染</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head>
+<body>
+<script type="module">
+// 岸边碎浪对照：坡度 1:40 的平直沙滩，向岸风浪，相机站在沙滩上看海（对照 CC0 实拍“Ocean surface waves”）。
+//   window.__cmp.render({ U, fetch, slope, ... }) 推进到稳态后渲染一帧
+import * as THREE from 'three';
+import { Ocean } from '../../ocean/index.js';
+import { SkyEnvironment } from '../../ocean/SkyEnvironment.js';
+
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, W / H, 0.3, 200000);
+const sky = new SkyEnvironment(renderer, { cubeSize: 256 });
+scene.add(sky.object);
+const ocean = new Ocean(renderer, { quality: 'high', sea: { wind: { x: 0, z: 8 }, fetch: 50e3, depth: 30, timeScale: 1 } });
+scene.add(ocean.mesh);
+
+// 水深图：海岸线 z = 0，向 −z 方向是海，坡度 slope；+z 是沙滩（陆地）
+const N = 512, RECT = new THREE.Vector4(-500, -900, 1000, 1000);
+function bathy(slope) {
+  const d = new Float32Array(N * N * 4);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const z = RECT.y + (j + 0.5) / N * RECT.w;
+    const g = z > 0 ? Math.min(2, z * 0.08) : Math.max(-30, z * slope);
+    d[(j * N + i) * 4] = g;
+  }
+  const t = new THREE.DataTexture(d, N, N, THREE.RGBAFormat, THREE.FloatType);
+  t.minFilter = t.magFilter = THREE.LinearFilter; t.needsUpdate = true;
+  return t;
+}
+// 沙滩（画面下方的陆地）
+const sandMat = new THREE.MeshStandardMaterial({ color: 0x8a7a62, roughness: 1 });
+const sand = new THREE.Mesh(new THREE.PlaneGeometry(1000, 60).rotateX(-Math.PI / 2), sandMat);
+scene.add(sand);
+
+const probeRT = new THREE.WebGLRenderTarget(128, Math.round(128 * H / W), { type: THREE.FloatType });
+function autoExposure() {
+  const t = renderer.toneMapping; renderer.toneMapping = THREE.NoToneMapping;
+  renderer.setRenderTarget(probeRT); renderer.render(scene, camera); renderer.setRenderTarget(null);
+  renderer.toneMapping = t;
+  const w = probeRT.width, h = probeRT.height, b = new Float32Array(w * h * 4);
+  const gl = renderer.getContext(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  renderer.readRenderTargetPixels(probeRT, 0, 0, w, h, b);
+  let s = 0, n = 0;
+  for (let y = 0; y < h * 0.8; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4, L = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2]; if (Number.isFinite(L)) { s += Math.log(1e-4 + L); n++; } }
+  return 0.18 / Math.exp(s / Math.max(n, 1));
+}
+
+window.__cmp = {
+  ocean, sky,
+  async render({ U = 7, fetch = 30e3, slope = 1 / 40, steps = 450, dt = 1 / 15, camHeight = 2.2, camZ = 6, pitch = -3.5, tod = 17.2, sunAz = 0.4, clouds = 0.7, swell = { Hs: 0.9, Tp: 9, theta: Math.PI / 2 } } = {}) {
+    const m = ocean.model;
+    m.setWind(0.25 * U, U); m.snapWind(); m.setFetch(fetch); m.setDepth(30);
+    m.calm(); m.develop(1); m.setBackgroundSwell(swell);
+    ocean.setBathymetry(bathy(slope), RECT);
+    ocean.resetSea();
+    sand.position.set(0, 0.25, 30 + camZ * 0);
+    camera.position.set(0, camHeight, camZ);
+    const p = THREE.MathUtils.degToRad(pitch);
+    camera.lookAt(0, camHeight + Math.sin(p) * 100, camZ - Math.cos(p) * 100);
+    const gl = renderer.getContext(), wind = new THREE.Vector2(0.25 * U, U);
+    for (let i = 0; i < steps; i++) {
+      sky.update(dt, { camera, timeOfDay: tod, cloudCover: clouds, storm: 0, wind, sunAzimuth: sunAz });
+      ocean.update(dt, camera, sky);
+      if (i % 6 === 5) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); await new Promise((r) => setTimeout(r, 0)); }
+    }
+    renderer.toneMappingExposure = autoExposure();
+    renderer.render(scene, camera);
+    const r = ocean.readout, st = ocean.foam.stats;
+    return { U, Hs: r.Hs, HsWind: r.HsWind, HsSwell: r.HsSwell, Tp: r.Tp, coverage: st.coverage, active: st.active, residual: st.residual };
+  },
+};
+window.__ready = true;
+</script>
+</body>
+</html>

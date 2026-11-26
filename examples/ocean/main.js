@@ -11,6 +11,7 @@ import { Spray, SpumeEmitter } from '../../ocean/Spray.js';
 import { Sailboat } from '../../ocean/extras/Sailboat.js';
 import { SailingYacht } from '../../ocean/vessel/index.js';
 import { applyToThree, emitSpray, driveWake } from '../../ocean/vessel/three-adapter.js';
+import { BowWave } from '../../ocean/extras/BowWave.js';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -66,6 +67,7 @@ const hullWake = wake.createHullEmitter({ beam: boat.dims.beam, length: boat.dim
 const spray = new Spray({ max: isTouch ? 2500 : 6000 });
 scene.add(spray.object);
 const spume = new SpumeEmitter(spray, { maxRate: isTouch ? 400 : 1400 });
+const bowWave = new BowWave(yacht, { ocean, spray, rate: isTouch ? 0.5 : 1 });   // 船首浪破碎泡沫 + 水片
 const rain = createRain(isTouch ? 2500 : 6000);
 scene.add(rain.object);
 
@@ -220,6 +222,8 @@ function updateBoat(dt) {
   ocean.setWake(wake.texture, wake.rect);
   // 砰击飞溅：入水点、射流速度（Wagner 理论约 2 倍入水速度）、强度都由船体水压积分给出
   emitSpray(yacht, spray, { rate: isTouch ? 0.5 : 1 });
+  // 船首浪：傅汝德数 0.25 以上两舷起白、甩水片（泡沫进白浪场，按同样的寿命衰减）
+  bowWave.update(dt);
 }
 
 // ------------------------------------------------------------------ 机位
@@ -293,6 +297,8 @@ function updateCamera(dt) {
     camera.rotateX((Math.sin(t * 0.53 + 0.4) * 0.7 + Math.sin(t * 1.37) * 0.2) * 0.003);
   }
   if (Math.abs(camera.fov - camFov) > 1e-3) { camera.fov = camFov; camera.updateProjectionMatrix(); }
+  // 测试钩子：对照实拍时把相机固定在船上某处（例如船首舷侧、船尾）
+  if (window.__demo?.cameraOverride) window.__demo.cameraOverride(camera, boat.group, yacht);
 }
 
 // ------------------------------------------------------------------ 界面
@@ -518,7 +524,7 @@ renderer.setAnimationLoop(frame);
 
 // 测试钩子（控制台）
 window.__demo = {
-  ocean, sky, boat, yacht, post, S, applyShot, setCam,
+  ocean, sky, boat, yacht, post, S, applyShot, setCam, windNow,
   /** 手动推进 n 帧（不渲染），用于自动化测试 */
   async step(n = 30, dt = 1 / 30) {
     for (let i = 0; i < n; i++) {

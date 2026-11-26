@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { WindSeaModel, whitecapCoverage } from './WindSeaModel.js';
 import { OceanSimulation } from './OceanSimulation.js';
 import { buildOceanGeometry } from './OceanGeometry.js';
-import { createOceanMaterial } from './OceanMaterial.js';
+import { createOceanMaterial, FAR_CAP_AREA } from './OceanMaterial.js';
 import { FoamField, FOAM_TIMESCALES } from './FoamField.js';
 
 /**
@@ -65,6 +65,7 @@ export class Ocean {
     this.sim = new OceanSimulation(this.renderer, { size: q.size, cascades: q.cascades, readback: q.readback, choppiness: this.params.choppiness, seed });
     this.foam?.dispose();
     this.foam = new FoamField(this.renderer, this.sim, q.foam);
+    if (this._bathy) this.foam.setBathymetry(this._bathy.texture, this._bathy.rect);
     const geometry = buildOceanGeometry(q.grid);
     const material = createOceanMaterial(this.sim);
     material.uniforms.uFoamField.value = this.foam.texture;
@@ -187,19 +188,32 @@ export class Ocean {
     this.foam.update(dt, {
       cameraX: cam.x, cameraZ: cam.z, drift: this._drift, threshold: this.foamThreshold, gain: 12,
       sigmaH: Math.max(0.05, ro.Hs / 4), waveDir: this._waveDir, windDir: w,
-      groupSpeed: 0.5 * cb, segScale: THREE.MathUtils.clamp(0.5 * lb, 2, 8),
+      // 破碎段长：实拍里 6 级风的白浪是一块块 1–5 m 的亮斑，比整条浪峰短得多
+      groupSpeed: 0.5 * cb, segScale: THREE.MathUtils.clamp(0.3 * lb, 2, 5),
       // 老化泡沫丝：大风时破碎多、泡沫厚，残留泡沫消退后留下更多、更持久的薄泡沫
-      tau: { A: FOAM_TIMESCALES.tauA, B: FOAM_TIMESCALES.tauB * life, C: (6 + 24 * strong) * life, toC: 0.2 * strong },
+      // 大风时残留泡沫留下更多、更持久的泡沫丝（NOAA 8–9 级照片里沿风向的泡沫条纹占了海面相当一部分）
+      tau: { A: FOAM_TIMESCALES.tauA, B: FOAM_TIMESCALES.tauB * life, C: (8 + 32 * strong) * life, toC: 0.35 * strong },
       // 朗缪尔环流（取最小一级、离表面最近的涡卷）：表面辐合 ≈ 0.6% U10、辐合线上顺风射流 ≈ 0.8% U10，
       // 线距几米（实测线距从 2 m 到数百 m 多个尺度并存）；十几秒就能把泡沫丝聚成沿风向的细条
       langmuir: { converge: 0.006 * U, jet: 0.008 * U, spacing: THREE.MathUtils.clamp(2.5 + 0.25 * U, 3, 10) },
+      hrms: Math.max(0.02, ro.Hs / Math.SQRT2),          // 深水均方根浪高（浅水破碎用）
     });
     this._crestTimer += dt;
     if (this._crestTimer > 0.1) { this._crestTimer = 0; this.foam.readCrests(); }
     u.uFoamField.value = this.foam.texture;
     this.foam.uvOffsetFor(ox, oz, u.uFoamUV.value);
     const fsx = this.foam.stats;
-    u.uFoamMean.value.set(fsx.active, fsx.residual, fsx.lace, fsx.coverage);
+    u.uFoamMean.value.set(fsx.active, fsx.residual, fsx.lace, fsx.fresh);
+    // 远处统计白浪：尺度取破碎浪长的一半左右（2–12 m），寿命 = 活跃 + 残留（τA + τB）；
+    // 格子边长让每格出现白浪的概率约 0.8（覆盖率高时格子变小，最小 1.2 倍白浪尺度）。
+    // 一个白浪按寿命平均的有效面积 = FAR_CAP_AREA·尺度²（形状 × 由亮转淡的积分，见 OceanMaterial）
+    const capSize = THREE.MathUtils.clamp(0.45 * lb, 2, 12);
+    const fmean = Math.max(fsx.active + fsx.residual, 1e-5);
+    const cell = THREE.MathUtils.clamp(Math.sqrt(FAR_CAP_AREA * capSize * capSize * 0.8 / fmean), 1.2 * capSize, 8 * capSize);
+    u.uFarCell.value = Math.pow(2, Math.round(Math.log2(cell) * 8) / 8);
+    u.uFarCap.value.set(capSize, FOAM_TIMESCALES.tauA + FOAM_TIMESCALES.tauB * life,
+      this.time % 4096, Math.atan2(this._waveDir.y, this._waveDir.x));
+    u.uFoamDrift.value.set(wrapP(this._drift.x, 4096), wrapP(this._drift.y, 4096));
     const fs = u.uFoamParams.value.w, fs2 = fs * 0.29;
     // 第二层泡沫纹理旋转 37°（cos 0.8、sin 0.6），两层格点不对齐，看不出平铺
     const px2 = ox - 1.25 * this._drift.x, pz2 = oz - 1.25 * this._drift.y;
@@ -216,7 +230,7 @@ export class Ocean {
     u.uMicroVar.value = residual;
     u.uRipple.value = Math.min(0.28, Math.sqrt(9.4 * 0.6 * residual));
     // 老化泡沫丝图案：风坐标系里沿风向拉长，随漂流移动
-    const sfx = fs * 8, sfz = fs * 0.4;
+    const sfx = fs * 3, sfz = fs * 0.45;
     u.uStreakOff.value.set(frac((a - (this._drift.x * w.x + this._drift.y * w.y)) / sfx), frac((b - (-this._drift.x * w.y + this._drift.y * w.x)) / sfz));
     const calmFade = THREE.MathUtils.smoothstep(U, 0.5, 3) * (1 - 0.6 * THREE.MathUtils.smoothstep(U, 8, 16));
     u.uGustiness.value = this.params.gustiness * calmFade;
@@ -295,11 +309,13 @@ export class Ocean {
     if (texture) { u.uWake.value = texture; u.uWakeRect.value.copy(rect); }
   }
 
-  /** 水深：texture R = 地面高度（m，海平面为 0，水下为负）；rect 同上 */
+  /** 水深：texture R = 地面高度（m，海平面为 0，水下为负）；rect 同上。同时开启浅水按水深限制的破碎（岸边碎浪） */
   setBathymetry(texture, rect) {
     const u = this.material.uniforms;
     u.uUseBathy.value = texture ? 1 : 0;
     if (texture) { u.uBathy.value = texture; u.uBathyRect.value.copy(rect); }
+    this._bathy = texture ? { texture, rect: rect.clone() } : null;
+    this.foam.setBathymetry(texture, rect);
   }
 
   /** 平面反射：texture 为镜像相机渲染结果（alpha 标记有物体处），matrix 为世界 → 纹理坐标 */
@@ -326,6 +342,9 @@ export class Ocean {
     }
     return n;
   }
+
+  /** 本帧加一个泡沫源（世界坐标，半径 m，活跃白浪面积比例 0–1）：船首浪破碎、尾流等。每帧最多 16 个 */
+  addFoam(x, z, radius, amount) { this.foam.addSource(x, z, radius, amount); }
 
   /** 主浪（风浪谱峰）的传播方向与相速度 */
   get dominantWave() {

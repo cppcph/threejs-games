@@ -1,6 +1,6 @@
 # Three.js 小游戏四款
 
-四款浏览器 3D 游戏，每款就是一个 HTML 文件。模型、贴图、音效和音乐全部由代码生成，没有任何资源文件，只从 CDN 加载 three.js r170 和字体。
+四款浏览器 3D 游戏。三款各是一个 HTML 文件；《信风》是 `index.html` + `main.js`，海面、天空和帆船直接用仓库里的 `ocean/` 模块。模型、贴图、音效和音乐全部由代码生成，没有任何资源文件，只从 CDN 加载 three.js r170 和字体。
 
 品类参考了 GitHub 上 Claude 游戏合集里最受欢迎的几款（见文末“来源”）。玩法是同一类，名字、角色、美术和关卡都是原创。
 
@@ -30,7 +30,7 @@
   - 航速、横倾、漂角、纵摇、砰击和尾迹角都是力平衡的结果，没有写死的极曲线；
   - 10 节风下的极曲线与 ORC 证书实船相差不到 2%。
 - **验证**：
-  - 32 项物理单元测试（风浪生长、水滴终端速度对照 Gunn & Kinzer 实测、帆船静水力 / 稳性 / 极曲线 / 固有周期 / 换舷）；
+  - 34 项物理单元测试（风浪生长、水滴终端速度对照 Gunn & Kinzer 实测、帆船静水力 / 稳性 / 极曲线 / 固有周期 / 换舷 / 辅机 / 触底）；
   - 白浪覆盖率在 8–20 m/s 与 Monahan 观测相差不到 1.6 倍（破碎阈值是与风速无关的物理常数）；
   - GPU FFT 与 CPU 逐点 DFT 对照；
   - 理论 Hs 与模拟海面实测 Hs 在 ±4% 内吻合（含浅水和涌浪）。
@@ -50,7 +50,7 @@
 | **晴空** | **起浪：风刚吹起的年轻海面** |
 | ![晴空](docs/screenshots/windsea-tropical.jpg) | ![起浪](docs/screenshots/windsea-growth.jpg) |
 
-模块说明、公式、API、性能分档和踩过的坑都在 [ocean/README.md](ocean/README.md)。《信风》游戏里仍是早先的 Gerstner 海面（见 [WATER.md](games/windpost/WATER.md)），新模块是它的升级版。
+模块说明、公式、API、性能分档和踩过的坑都在 [ocean/README.md](ocean/README.md)。《信风》游戏就建在这个模块上（接法见 [WATER.md](games/windpost/WATER.md)）。
 
 ## 四款游戏
 
@@ -66,17 +66,20 @@
 ![信风：日落时的海面与邮船](docs/screenshots/windpost-sunset.jpg)
 
 - **玩法**：出港教学（3 道浮标门）→ 5 封限时送信（金、银、铜章）→ 环岛赛（6 道门计时）。海上还有漂流瓶可以捡。昼夜循环约 12 分钟，海况可以调到风暴，会下雨打雷。
-- **航海**：区分真风和视风。航速按风向角变化，船头和风向夹角小于约 35° 就走不动（逆风停滞），横风最快。帆默认自动调；手动调对了会更快，换舷时帆杆会甩过去。
-- **渲染**：
-  - 14 个 Gerstner 波，CPU 和 GPU 用同一套波，船的浮力和画面里的浪对得上；
-  - 逐像素法线，远处小浪按像素大小淡出，避免闪烁；
-  - Fresnel 反射天空，太阳在海面上铺出一条闪光带；
-  - 浅滩透出沙底和焦散，有岸线泡沫和浪尖透光；
-  - 船尾迹单独存一张贴图，带开尔文 V 形波臂，夜里会发蓝光；
-  - 船体按参数放样生成，帆随风鼓起。
-- **渲染调参面板（按 T）**：约 20 个实时参数，包括海况、风向、波峰尖锐度、水色、泡沫、反射、时刻、雾、曝光、泛光。还能切调试视图：线框、法线、泡沫遮罩、尾迹图、水深、菲涅尔。
-- **技术说明**：[games/windpost/WATER.md](games/windpost/WATER.md)，讲每个模块怎么做、参数作用、怎么搬到别的 Three.js 项目、性能分档和踩过的坑。
-- **操作**：A/D 或 ←/→ 转舵，W/S 收放帆（E 恢复自动），Shift 辅助马达，拖动视角、滚轮缩放，C 切视角，H 拍照模式（隐藏界面），T 渲染面板，P 暂停，M 静音。手机上左下是舵盘，右侧是调帆滑杆和马达按钮。
+- **航海（物理）**：船是 [ocean/vessel](ocean/vessel/README.md) 的六自由度帆船：浮力和颠簸来自船体在 FFT 海面上的水压积分，航速、横倾、漂角来自帆、龙骨、舵与船体阻力的力平衡，没有写死的极曲线。
+  - 14 节信风、1.2 m 的信风浪里横风约 6 节（平静水面 6.8），侧顺风 5.8 节，正顺风 5 节左右，横倾十几度；迎风在浪里慢得多：真风角 40° 只有 3 节，最划算的是 50°–60°（约 5 节，VMG 3 节；平静水面 40° 就有 6 节）；25 节风暴里侧顺风能冲到 7–8 节；
+  - A/D 直接转舵（±30°，松开回中）。船速越快舵越灵；船首转进逆风区，帆会抖，船会停下来（逆风停滞）；迎风换舷要带着速度一口气转过风，浪里常在风眼里停几秒，停住时把舵打到底等风把船首压开，或开马达；
+  - 帆默认自动调（VPP 式，风大时自动压平、缩帆）；W/S 手动收放，放太松抖帆、收太紧失速；
+  - Shift 开辅机（平静水面约 5.8 节），X 倒车；靠港要减速到 3 节以下；
+  - 撞上岛的水下地形会搁浅（龙骨触底、船停住、倒向一舷），轻的可以倒车退出，搁死了可以请求拖船。
+- **海面**（[ocean/](ocean/README.md)）：
+  - 风决定浪：浪高、周期、白浪多少都由风速、风区、风时按海洋学规律算出，GPU FFT 合成；风暴时浪高约 2.8 m；
+  - 白浪在世界坐标里判定破碎、随水漂流；岛周围按水深破碎成岸线浪花，浅滩透出沙底；
+  - 船尾迹带开尔文波臂，船首浪破碎、砰击溅起水花，大风时浪尖被撕成飞沫；夜里尾迹和碎浪发蓝光；
+  - 天空、云、日月星、闪电与海面反射同一套光照单位。
+- **渲染调参面板（按 T）**：海况、风向风速、浪尖、白浪与泡沫寿命、猫爪风、水色、夜光藻、天空反射与倒影、时刻、云、雾、曝光、泛光，调试视图（法线、泡沫、粗糙度、菲涅尔、尾迹、水深、阵风、白浪场、线框），画质高 / 中 / 低。
+- **技术说明**：[games/windpost/WATER.md](games/windpost/WATER.md)：用到哪些模块、每帧顺序、风与浪的设置、按键怎样变成舵角 / 帆脚索 / 油门、天空与光照单位、面板参数对照、画质分档、测试钩子，以及从旧版去掉了什么。
+- **操作**：A/D 或 ←/→ 转舵（F 稳舵辅助），W/S 收放帆（E 恢复自动），Shift 辅机正车、X 倒车，R 请求拖船（搁浅后），拖动视角、滚轮缩放，C 切视角，H 拍照模式（隐藏界面），T 渲染面板，Q 画质，P 暂停，M 静音。手机上左下是舵盘，右侧是调帆滑杆和马达、倒车按钮。
 
 | 浅滩与码头 | 夜光尾迹 |
 |---|---|
@@ -130,12 +133,12 @@ python3 -m http.server 8000
 index.html                  首页
 ocean/                      可复用海面模块（说明见 ocean/README.md；帆船动力学在 ocean/vessel/）
 examples/ocean/             海面演示「风生浪」
-games/<名字>/index.html     各游戏，单文件
-games/windpost/WATER.md     《信风》的 Gerstner 水体说明
+games/<名字>/index.html     各游戏，单文件（信风另有 main.js）
+games/windpost/WATER.md     《信风》怎样接海面、天空与帆船模块
 docs/screenshots/           截图
 tools/play.cjs              无头浏览器试玩、截图（--root 可加载仓库里的 ES 模块）
 tools/artifact.cjs          独立网页 ↔ claude.ai Artifact 片段互转
-tools/build-ocean-demo.mjs  把海面演示打包成单文件 Artifact（需要 esbuild）
+tools/build-artifact.mjs    把带 ES 模块入口的页面（海面演示、信风）打包成单文件 Artifact（需要 esbuild）
 tests/smoke.cjs             游戏冒烟测试（加载 → 开始 → 操作 → 截图）
 tests/ocean/                海面模块测试：风浪 / 水滴 / 帆船单元测试、GPU FFT 校验、Hs 一致性、看图页、帆船实海检查
 ```
@@ -147,7 +150,7 @@ tests/ocean/                海面模块测试：风浪 / 水滴 / 帆船单元�
 ```bash
 npm install
 npx playwright install chromium
-node tools/play.cjs games/windpost/index.html out/windpost tests/smoke.cjs
+node tools/play.cjs games/windpost/index.html out/windpost tests/smoke.cjs --root=.
 ```
 
 `npm install` 之后，测试会用本地的 three.js 代替 CDN，断网也能跑。没有显卡的机器上 Chromium 用软件渲染，几帧每秒，只适合验证流程。
@@ -172,7 +175,8 @@ node --test tests/ocean/spray.test.mjs tests/ocean/vessel.test.mjs
 claude.ai 的 Artifact 会自己套上 `<html><head><body>` 骨架，所以发布的是骨架里面那段：
 
 ```bash
-node tools/artifact.cjs unwrap games/windpost/index.html /tmp/windpost.html
+node tools/artifact.cjs unwrap games/foxfire/index.html /tmp/foxfire.html
+npm run build:windpost    # 信风、海面演示（npm run build:ocean）有 ES 模块入口，要用 esbuild 打包成单文件片段
 ```
 
 ## 来源
@@ -191,4 +195,4 @@ node tools/artifact.cjs unwrap games/windpost/index.html /tmp/windpost.html
 - 开发环境没有显卡，只在软件渲染下跑通了流程，没测过真机帧率。每款都有画质开关，手机默认低画质或限制像素比。
 - 音效和音乐都由 Web Audio 实时合成，只确认运行不报错，没有实际试听。
 - 锈钟解除锁定后自由转视角，镜头可能穿进 Boss 或柱子。
-- 信风正对下午的太阳时眩光较强，可以在渲染面板里调低“泛光”或“高光强度”。
+- 信风正对下午的太阳时眩光较强，可以在渲染面板里调低“泛光”或“曝光”。

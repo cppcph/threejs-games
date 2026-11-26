@@ -20,6 +20,9 @@
 import * as THREE from 'three';
 import { makeFoamTexture, makeRippleTexture } from './textures.js';
 
+/** 远处统计白浪：一个白浪按寿命平均的有效面积 / 尺度²（farBlob 的形状 × (1 − 相位²) 数值积分） */
+export const FAR_CAP_AREA = 0.315;
+
 const VERT = /* glsl */`
 uniform sampler2D uDisp0;
 uniform sampler2D uDisp1;
@@ -75,7 +78,10 @@ uniform sampler2D uSlope2;
 uniform sampler2D uFoamField;   // 白浪场：A 活跃、B 残留、C 老化泡沫丝（面积比例）、f
 uniform vec2 uFoamUV;           // 白浪场 uv = vLocal / 边长 + uFoamUV
 uniform float uFoamInvE;
-uniform vec4 uFoamMean;         // 白浪场全图平均（场外远处用）
+uniform vec4 uFoamMean;         // 白浪场全图平均（场外远处用）：A、B、C、新鲜度示踪 F
+uniform vec4 uFarCap;           // 远处的统计白浪：单个白浪尺度（m）、寿命（s）、时间（s，取模）、主浪方向角
+uniform float uFarCell;         // 撒点格子的边长（m）：覆盖率越高格子越小（CPU 按 1/8 倍频程量化，避免连续跳变）
+uniform vec2 uFoamDrift;        // 表面累计漂流（m，对周期取模）：远处白浪随水漂
 uniform vec3 uFoamAlbedo;       // A、B、C 的反照率
 uniform float uFoamDamp;        // 残留泡沫对毛细波的抑制（0–1）
 uniform vec3 uInvL;
@@ -158,6 +164,32 @@ float uniformSum(float a, float b, float w) {
 }
 // 面积比例 f 的泡沫遮罩：均匀图案 p 上取“p > 1 − f”，线性过渡带宽随图案的屏幕频率变化；
 // 图案细于像素时直接返回 f（期望值处处等于 f）
+// 远处的统计白浪：世界坐标里按格子撒点，每格同一时刻最多一个白浪，出现概率使面积比例等于场内实测的 f；
+// 每个白浪按寿命 τ 由亮转淡，到期在格内换一个位置重生（随机相位，不会同时闪烁）；形状沿浪峰（垂直主浪方向）拉长。
+// 一个白浪按寿命平均的有效面积 = FAR_CAP_AREA·尺度²（下面形状 × (1 − 相位²) 的数值积分），出现概率按它算，
+// 期望覆盖率才等于 f。白浪可以伸出自己的格子，所以取离该点最近的 2×2 个格子（格子 ≥ 1.2 倍尺度时这样就不漏）。
+// 像素足迹大于白浪尺度时退回平均值 f（统计上一致，远处不闪）
+float farBlob(vec2 c, vec2 xw, float f, float size, float cell, float life, float t, vec2 wdir) {
+  float age = t / life + hash12(c * 1.37 + 0.5);
+  float epoch = floor(age), phase = fract(age);
+  float p = clamp(f * cell * cell / (size * size * ${FAR_CAP_AREA.toFixed(4)}), 0.0, 1.0);
+  if (hash12(c * 2.11 + epoch * 13.7) >= p) return 0.0;
+  vec2 jit = vec2(hash12(c + epoch * 7.13), hash12(c * 0.71 + epoch * 3.31 + 9.2));
+  vec2 d = xw - (c + 0.2 + 0.6 * jit) * cell;
+  vec2 q = vec2(dot(d, vec2(-wdir.y, wdir.x)), dot(d, wdir));      // 沿浪峰、沿传播
+  float r = length(q / (size * vec2(0.7, 0.32)));
+  return (1.0 - smoothstep(0.55, 1.0, r * (0.85 + 0.3 * phase))) * (1.0 - phase * phase);   // 先活跃后残留，逐渐变淡
+}
+float farWhitecaps(vec2 xw, float f, float size, float cell, float life, float t, vec2 wdir, float footprint) {
+  if (f <= 0.0) return 0.0;
+  float w = 1.0 - smoothstep(0.35 * size, 1.5 * size, footprint);   // 白浪小于像素：用平均值
+  if (w <= 0.0) return f;
+  vec2 c0 = floor(xw / cell - 0.5);
+  float b = max(max(farBlob(c0, xw, f, size, cell, life, t, wdir), farBlob(c0 + vec2(1.0, 0.0), xw, f, size, cell, life, t, wdir)),
+                max(farBlob(c0 + vec2(0.0, 1.0), xw, f, size, cell, life, t, wdir), farBlob(c0 + vec2(1.0, 1.0), xw, f, size, cell, life, t, wdir)));
+  return mix(f, b, w);
+}
+
 float coverMask(float p, float f) {
   float w = clamp(fwidth(p) * 0.75, 0.02, 0.5);
   float m = clamp((p - 1.0 + f) / (2.0 * w) + 0.5, 0.0, 1.0) * smoothstep(0.0, 0.02, f);
@@ -202,7 +234,19 @@ void main() {
   float wNear = 1.0 - smoothstep(0.8, 0.97, edgeD);
   vec4 fld = wNear > 0.0 ? texture2D(uFoamField, fuv) : vec4(0.0);
   float crestMod = clamp(1.0 + 1.8 * vHeight / max(uWaveScale, 0.05), 0.0, 3.0);   // 浪高 / σ 的线性调制，均值约 1
-  vec3 frc = mix(vec3(uFoamMean.x * crestMod, uFoamMean.y * mix(1.0, crestMod, 0.5), uFoamMean.z), fld.xyz, wNear);
+  vec3 far = vec3(uFoamMean.x * crestMod, uFoamMean.y * mix(1.0, crestMod, 0.5), uFoamMean.z);
+  if (wNear < 1.0 && uFoamMean.x + uFoamMean.y > 0.0) {
+    // 场外：把活跃 + 残留的平均比例换成一个个离散的白浪（实拍里远处的“白马”是一个个亮点，不是一层灰）
+    float fp = length(fwidth(vWorld.xz));
+    vec2 xs = vWorld.xz - uFoamDrift;
+    vec2 wd = vec2(cos(uFarCap.w), sin(uFarCap.w));
+    float cap = farWhitecaps(xs, (uFoamMean.x + uFoamMean.y) * clamp(crestMod, 0.3, 2.0), uFarCap.x, uFarCell, uFarCap.y, uFarCap.z, wd, fp);
+    float share = uFoamMean.x / max(uFoamMean.x + uFoamMean.y, 1e-4);
+    far.x = cap * share; far.y = cap * (1.0 - share);
+  }
+  vec3 frc = mix(far, fld.xyz, wNear);
+  // 残留泡沫的新鲜度 F/B（两个面积比例之比，mip 平均和远近都不改变它）；场外用全图平均
+  float freshRatio = clamp(mix(far.y * uFoamMean.w / max(uFoamMean.y, 1e-5), fld.w, wNear) / max(frc.y, 1e-4), 0.0, 1.0);
 
   // 阵风（猫爪风）：随风平移的噪声，只改变短波；残留泡沫与表面膜处毛细波被抑制
   float gust = 1.0;
@@ -252,26 +296,32 @@ void main() {
   if (uUseBathy > 0.5) {
     float ground = texture2D(uBathy, (vWorld.xz - uBathyRect.xy) / uBathyRect.zw).r;
     waterDepth = max(0.0, vWorld.y - ground);
-    float band = 0.5 + 0.5 * sin(waterDepth * 4.0 - uTime * 1.3 + fbm3(np * 0.15) * 6.0);
-    shoreFoam = smoothstep(1.6, 0.0, waterDepth) * (0.35 + 0.65 * band);
+    // 岸边碎浪由白浪场的浅水破碎给出；这里只留水线处一圈很窄的冲流泡沫
+    shoreFoam = smoothstep(0.25, 0.0, waterDepth) * (0.6 + 0.4 * fbm3(np * 0.4 + uTime * 0.2));
   }
   // 图案（随表面漂流）：两层不同尺度、旋转 37° 的同一张均衡纹理，合成后再映射回均匀分布
   vec4 ft = texture2D(uFoamTex, vLocal / uFoamParams.w + uFoamOff.xy);
   vec4 ft2 = texture2D(uFoamTex, vec2(0.8 * vLocal.x - 0.6 * vLocal.y, 0.6 * vLocal.x + 0.8 * vLocal.y) / (uFoamParams.w * 0.29) + uFoamOff.zw);
-  vec2 wl = lp + vec2(0.0, (fbm3(lp / 45.0) - 0.5) * 4.0);
-  float fil = texture2D(uFoamTex, wl / vec2(uFoamParams.w * 8.0, uFoamParams.w * 0.4) + uStreakOff).r;   // 沿风向拉长的丝
+  // 泡沫丝：实拍里是弯曲、分叉、断续的“大理石纹”，不是直线。沿风向只拉长 3 倍，再做两层扭曲；
+  // 成条成带的走向由白浪场里的朗缪尔环流决定，图案只负责细丝的样子
+  vec2 wl = lp + vec2((fbm3(lp / 23.0 + 3.1) - 0.5) * 6.0, (fbm3(lp / 9.0) - 0.5) * 3.0 + (fbm3(lp / 45.0) - 0.5) * 4.0);
+  float fil = texture2D(uFoamTex, wl / vec2(uFoamParams.w * 3.0, uFoamParams.w * 0.45) + uStreakOff).r;
   float fA = clamp(frc.x * uFoamParams.x, 0.0, 1.0);
   float fB = clamp(max(frc.y * uFoamParams.x, max(wakeFoam, shoreFoam)), 0.0, 1.0);
   float fC = clamp(frc.z * uFoamParams.x, 0.0, 1.0);
   float mA = coverMask(uniformSum(ft.g, ft2.b, 0.6), fA);
   float mB = coverMask(uniformSum(ft.r, ft2.r, 0.62), fB);
-  float mC = coverMask(uniformSum(fil, ft2.r, 0.8), fC);
-  // 尾迹与岸线泡沫：越浓越接近新鲜白浪的亮度
-  float rhoB = mix(uFoamAlbedo.y, uFoamAlbedo.x, clamp(max(wakeFoam, shoreFoam) * 1.3 - 0.3, 0.0, 1.0));
-  // 不透明度：厚白浪 1，残留泡沫 0.85，薄泡沫丝 0.5
+  float mC = coverMask(uniformSum(fil, ft.r, 0.65), fC);
+  // 残留泡沫随时间变薄：气泡破裂，泡沫筏变稀、变透明，反射率下降（Koepke 1984：新鲜 0.55，
+  // 按寿命平均的有效值只有 0.22）。年龄来自白浪场的新鲜度示踪：F/B = e^(−年龄/τB)。
+  // 尾迹与岸线泡沫越浓越接近新鲜白浪
+  float fresh = smoothstep(0.08, 0.75, freshRatio);
+  float rhoB = mix(uFoamAlbedo.y * (0.45 + 0.55 * fresh), uFoamAlbedo.x, clamp(max(wakeFoam, shoreFoam) * 1.3 - 0.3, 0.0, 1.0));
+  float opB = mix(0.45, 0.9, max(fresh, clamp(max(wakeFoam, shoreFoam) * 1.3, 0.0, 1.0)));
+  // 不透明度：厚白浪 1，残留泡沫 0.45–0.9（随年龄），薄泡沫丝 0.5
   float oB = (1.0 - mA) * mB, oC = (1.0 - mA) * (1.0 - mB) * mC;
-  float foam = clamp(mA + 0.85 * oB + 0.5 * oC, 0.0, 1.0);
-  float foamRho = mA * uFoamAlbedo.x + oB * rhoB + oC * uFoamAlbedo.z;
+  float foam = clamp(mA + opB * oB + 0.5 * oC, 0.0, 1.0);
+  float foamRho = mA * uFoamAlbedo.x + oB * rhoB * opB / 0.85 + oC * uFoamAlbedo.z;
   alpha = mix(alpha, 0.6, foam);
 
   // ---- 反射
@@ -380,6 +430,7 @@ export function createOceanMaterial(sim, options = {}) {
     uSlope0: { value: c[0].slope }, uSlope1: { value: c[1].slope }, uSlope2: { value: c[2].slope },
     uFoamField: { value: blank }, uFoamUV: { value: new THREE.Vector2(-10, -10) }, uFoamInvE: { value: 1 / 512 },
     uFoamMean: { value: new THREE.Vector4() }, uFoamAlbedo: { value: OCEAN_LOOK.foamAlbedo.clone() }, uFoamDamp: { value: 0.6 },
+    uFarCap: { value: new THREE.Vector4(6, 4.5, 0, 0) }, uFarCell: { value: 20 }, uFoamDrift: { value: new THREE.Vector2() },
     uInvL: { value: new THREE.Vector3(1 / c[0].L, 1 / c[1].L, 1 / c[2].L) },
     uTexelSize: { value: new THREE.Vector3(c[0].L / sim.size, c[1].L / sim.size, c[2].L / sim.size) },
     uOriginUV0: { value: new THREE.Vector2() }, uOriginUV1: { value: new THREE.Vector2() }, uOriginUV2: { value: new THREE.Vector2() },

@@ -5,8 +5,9 @@
   "scripts": {
     "serve": "python3 -m http.server 8000",
     "play": "node tools/play.cjs",
-    "build:ocean": "node tools/build-ocean-demo.mjs node_modules/.bin/esbuild out/windsea.html",
-    "test:ocean": "node --test tests/ocean/*.test.mjs"
+    "build:ocean": "node tools/build-artifact.mjs examples/ocean/index.html out/windsea.html node_modules/.bin/esbuild",
+    "test:ocean": "node --test tests/ocean/*.test.mjs",
+    "build:windpost": "node tools/build-artifact.mjs games/windpost/index.html out/windpost.html node_modules/.bin/esbuild"
   },
   "devDependencies": {
     "playwright": "1.63.0",

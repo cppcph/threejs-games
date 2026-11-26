@@ -657,6 +657,8 @@ export class SkyEnvironment {
       this._probeBusy = false;
       if (this._probeQueued) { this._probeQueued = false; this._runProbe(); }
     }).catch(() => { this._probeBusy = false; this._probeRT = null; });
+    // three r170 发起异步读取后没有解绑 PIXEL_PACK_BUFFER，之后任何同步 readPixels 都会失败（与 OceanSimulation 相同的处理）
+    const gl = r.getContext(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   }
 
   // —— 闪电：storm > 0.6 时随机触发，每次 2–3 个脉冲 ——

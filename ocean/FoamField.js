@@ -9,12 +9,16 @@
 //   B  残留泡沫（stage B）：破碎停止后留在水面的泡沫斑，τB ≈ 3.9 s（Monahan & Lu 1990）
 //   C  老化泡沫丝：B 消退时残下的薄泡沫与表面活性物质膜，寿命几十秒，被朗缪尔环流
 //      聚到沿风向的辐合线上、被辐合线上更快的顺风流拉长 → 大风时沿风向的泡沫条纹（蒲福 7–9 级描述）
-// 第四个通道 f = min(1, A + B)：照片法测得的白浪覆盖率（Monahan 定义，含 A、B，不含很薄的 C）。
+// 第四个通道 F：残留泡沫里“新鲜”的部分，与 B 同源（都来自 A 的衰减），但按 τB/2 衰减，所以 F/B = e^(−年龄/τB)。
+//   F/B 是两个面积比例之比，在 mip 平均、远处取样时都不变 —— 着色器据此按年龄改变残留泡沫的亮度和透明度，
+//   不会因为离得远（mip 把小斑块平均成低比例）而把新鲜泡沫当成老泡沫画暗。
+// 照片法覆盖率 f = min(1, A + B)（Monahan 定义，含 A、B，不含很薄的 C）在统计时逐纹素算。
 //
 // 破碎判据：波长 > 约 4 m 的两级合成的总雅可比 J = (1+Dxx)(1+Dzz) − Dxz² 低于阈值，
 // 即局部水平压缩（≈ 线性化的浪峰陡度）超过临界值；只在浪峰之上、偏浪前坡，强度沿浪峰分段变化
 // （分段噪声随主浪群速度移动：破碎集中在波群能量最大处）。
-// 阈值由 Ocean 按观测覆盖率慢速校准；破碎发生在哪里、持续多久、留下什么，都由这里的过程决定。
+// 临界 J 是与风速无关的物理常数（Ocean.params.breakingThreshold）；破碎发生在哪里、持续多久、留下什么，都由这里的过程决定。
+// 有水深图时另加浅水破碎：Battjes & Janssen (1978) 的破碎比例 Qb = exp(−(γh / Hrms)²)，γ ≈ 0.78。
 import * as THREE from 'three';
 
 const VS = /* glsl */`
@@ -57,6 +61,13 @@ uniform vec2 uSegOff;         // 分段噪声随群速度的累计位移（m，�
 uniform float uSegScale;      // 破碎段的尺度（m）
 uniform vec2 uWindDir;
 uniform vec3 uLangmuir;       // 横风向辐合速度幅值、顺风射流幅值（m/s），辐合线间距（m）
+uniform float uUseBathy;      // 有水深图时：浅水按水深限制破碎（Battjes & Janssen 1978）
+uniform sampler2D uBathy;     // R = 地面高度（m，水下为负）
+uniform vec4 uBathyRect;      // minX, minZ, sizeX, sizeZ（世界坐标）
+uniform vec2 uRectMin;        // 本图左下角的参考坐标 x0（m）
+uniform vec2 uSurf;           // 深水 Hrms（m）、破碎指标 γ = Hmax / h
+uniform vec4 uSrc[16];        // 外部泡沫源（世界坐标）：x, z, 半径, 活跃白浪面积比例（船首浪破碎、尾流等）
+uniform int uSrcCount;
 layout(location = 0) out vec4 outState;
 ` + NOISE + /* glsl */`
 void main() {
@@ -77,13 +88,14 @@ void main() {
   vec2 cuv = puv - vel * uDt / uExtent;                     // 半拉格朗日平流（只对长寿命的 C）
   float C = inside(cuv) ? texture(uPrev, cuv).z : 0.0;
   C *= exp(-divergence * uDt);                              // 面密度守恒：辐合处变浓
-  float A = prev.x, B = prev.y;
+  float A = prev.x, B = prev.y, F = prev.w;
 
   // 生命周期（指数衰减按 dt 精确积分）：活跃 → 残留 → 老化泡沫丝
   float kA = exp(-uDt / uTau.x), kB = exp(-uDt / uTau.y), kC = exp(-uDt / uTau.z);
   float dA = A * (1.0 - kA), dB = B * (1.0 - kB);
   A *= kA;
   B = B * kB + dA;
+  F = F * kB * kB + dA;                                    // 新鲜度示踪：τB/2 衰减
   C = C * kC + dB * uTau.w;
 
   // 破碎判据
@@ -99,19 +111,55 @@ void main() {
   float seg = vnoise(g / uSegScale) * 0.6 + vnoise(g / (uSegScale * 0.41) + 5.2) * 0.4;
   // 破碎核心几乎全白（面积比例 → 1），边缘渐稀
   float brk = clamp((uThreshold - J) * uGain * mix(0.3, 1.6, smoothstep(0.3, 0.7, seg)) * crest * face * 2.5, 0.0, 1.0);
+
+  // 浅水破碎（Battjes & Janssen 1978；Thornton & Guza 1983）：水深 h 处最大浪高 Hmax = γh，
+  // 瑞利分布的浪高超过它的比例 Qb = exp(−(γh / Hrms)²)。破碎发生在入射浪的浪峰前坡上，
+  // 所以碎浪随浪峰一排排推向岸边，留下的残留泡沫照常衰减 —— 不再是装饰性的岸线条带
+  vec2 xw = uRectMin + vUv * uExtent + texture(uDisp0, uv0).xz + texture(uDisp1, uv1).xz;     // 这块水此刻的世界位置
+  for (int i = 0; i < 16; i++) {
+    if (i >= uSrcCount) break;
+    vec4 sc = uSrc[i];
+    brk = max(brk, sc.w * (1.0 - smoothstep(0.55 * sc.z, sc.z, distance(xw, sc.xy))));
+  }
+  if (uUseBathy > 0.5) {
+    float depth = -texture(uBathy, (xw - uBathyRect.xy) / uBathyRect.zw).r;
+    if (depth > 0.0) {
+      float r = uSurf.y * depth / max(uSurf.x, 0.02);
+      float Qb = exp(-r * r);
+      float surfCrest = smoothstep(0.0, 0.8, h / uSigmaH);
+      brk = max(brk, clamp(Qb * 1.6, 0.0, 1.0) * surfCrest * face);
+    } else {
+      brk = 0.0; A = 0.0; B *= 0.5; F *= 0.5;     // 陆地上没有水
+    }
+  }
   A = max(A, brk);
   B = min(B, 1.0 - A * 0.5);     // 活跃白浪盖在残留泡沫之上
   C = clamp(C, 0.0, 1.0);
 
-  outState = vec4(A, B, C, min(1.0, A + B));
+  F = min(F, B);
+  outState = vec4(A, B, C, F);
 }`;
 
-// 统计：最高一级 mip = 全图平均（各通道的平均面积比例）
-const STATS_FS = /* glsl */`
+// 照片法覆盖率 min(1, A + B) 要逐纹素算（先平均再取 min 会多算活跃白浪与残留泡沫重叠的部分）：
+// 每个输出格精确累加 8×8 个纹素，之后的 mip 平均才是线性的
+const COVER_FS = /* glsl */`
 precision highp float;
 uniform sampler2D uState;
 out vec4 outColor;
-void main() { outColor = textureLod(uState, vec2(0.5), 20.0); }`;
+void main() {
+  ivec2 b = ivec2(gl_FragCoord.xy) * 8;
+  float s = 0.0;
+  for (int j = 0; j < 8; j++) for (int i = 0; i < 8; i++) { vec4 v = texelFetch(uState, b + ivec2(i, j), 0); s += min(1.0, v.x + v.y); }
+  outColor = vec4(s / 64.0, 0.0, 0.0, 1.0);
+}`;
+
+// 统计：最高一级 mip = 全图平均。第 1 个像素 = 各通道的平均面积比例（A、B、C、F），第 2 个 = 照片法覆盖率
+const STATS_FS = /* glsl */`
+precision highp float;
+uniform sampler2D uState;
+uniform sampler2D uCover;
+out vec4 outColor;
+void main() { outColor = gl_FragCoord.x < 1.0 ? textureLod(uState, vec2(0.5), 20.0) : vec4(textureLod(uCover, vec2(0.5), 20.0).r, 0.0, 0.0, 0.0); }`;
 
 // 浪峰回读：按 mip 降采样到 M×M（每格的平均面积比例），供 CPU 在破碎处发射飞沫
 const CRESTS_FS = /* glsl */`
@@ -173,13 +221,20 @@ export class FoamField {
       uThreshold: { value: 0.3 }, uGain: { value: 12 }, uSigmaH: { value: 0.5 },
       uWaveDir: { value: new THREE.Vector2(1, 0) }, uSegOff: { value: new THREE.Vector2() }, uSegScale: { value: 8 },
       uWindDir: { value: new THREE.Vector2(1, 0) }, uLangmuir: { value: new THREE.Vector3(0, 0, 20) },
+      uUseBathy: { value: 0 }, uBathy: { value: null }, uBathyRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uRectMin: { value: new THREE.Vector2() }, uSurf: { value: new THREE.Vector2(0.5, 0.78) },
+      uSrc: { value: Array.from({ length: 16 }, () => new THREE.Vector4()) }, uSrcCount: { value: 0 },
     });
-    this.statsMat = raw(STATS_FS, { uState: { value: null } });
-    this.statsTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.FloatType, depthBuffer: false });
-    this._statsBuf = new Float32Array(4);
+    this._sources = [];
+    this.coverMat = raw(COVER_FS, { uState: { value: null } });
+    this.coverTarget = new THREE.WebGLRenderTarget(size / 8, size / 8, { type: opts.type, format: THREE.RGBAFormat,
+      minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: true, depthBuffer: false });
+    this.statsMat = raw(STATS_FS, { uState: { value: null }, uCover: { value: this.coverTarget.texture } });
+    this.statsTarget = new THREE.WebGLRenderTarget(2, 1, { type: THREE.FloatType, depthBuffer: false });
+    this._statsBuf = new Float32Array(8);
     this._statsPending = false;
-    /** 全图平均面积比例：active = A，residual = B，lace = C，coverage = 照片法白浪覆盖率 f */
-    this.stats = { active: 0, residual: 0, lace: 0, coverage: 0, samples: 0 };
+    /** 全图平均面积比例：active = A，residual = B，lace = C，coverage = 照片法白浪覆盖率 f = min(1, A + B)，fresh = 新鲜度示踪 F */
+    this.stats = { active: 0, residual: 0, lace: 0, coverage: 0, fresh: 0, samples: 0 };
 
     this.crestSize = crests;
     if (crests) {
@@ -187,7 +242,7 @@ export class FoamField {
       this.crestTarget = new THREE.WebGLRenderTarget(crests, crests, { type: THREE.FloatType, depthBuffer: false });
       this._crestBuf = [new Float32Array(crests * crests * 4), new Float32Array(crests * crests * 4)];
       this._crestPending = false;
-      /** 最近一次浪峰回读：data（RGBA = 各格 A、B、C、f），左下角参考坐标 minX/minZ，格宽 cell（m） */
+      /** 最近一次浪峰回读：data（RGBA = 各格 A、B、C、F），左下角参考坐标 minX/minZ，格宽 cell（m） */
       this.crests = null;
     }
   }
@@ -197,6 +252,21 @@ export class FoamField {
   /** 海面着色器采样用：uv = x0 / extent + offset（originX/Z 为网格原点，CPU 双精度） */
   uvOffsetFor(originX, originZ, out = new THREE.Vector2()) {
     return out.set((originX - this.rectMin.x) / this.extent, (originZ - this.rectMin.y) / this.extent);
+  }
+
+  /** 水深图（与 Ocean.setBathymetry 相同的约定）：开启浅水按水深限制的破碎；texture = null 关闭 */
+  setBathymetry(texture, rect) {
+    const u = this.updateMat.uniforms;
+    u.uUseBathy.value = texture ? 1 : 0;
+    if (texture) { u.uBathy.value = texture; u.uBathyRect.value.copy(rect); }
+  }
+
+  /**
+   * 本帧的外部泡沫源（世界坐标 x, z，半径 m，活跃白浪面积比例 0–1），例如船首浪破碎、螺旋桨尾流。
+   * 注入后与白浪一样按 τA → τB 衰减、随水漂流。每帧最多 16 个，update 之后清空。
+   */
+  addSource(x, z, radius, amount) {
+    if (this._sources.length < 16 && amount > 0) this._sources.push([x, z, radius, Math.min(1, amount)]);
   }
 
   /** 清空（风况突变、切镜头） */
@@ -249,6 +319,11 @@ export class FoamField {
     if (p.segScale) u.uSegScale.value = p.segScale;
     if (p.tau) u.uTau.value.set(p.tau.A, p.tau.B, p.tau.C, p.tau.toC);
     if (p.langmuir) u.uLangmuir.value.set(p.langmuir.converge, p.langmuir.jet, Math.max(2, p.langmuir.spacing));
+    u.uRectMin.value.copy(this.rectMin);
+    u.uSrcCount.value = this._sources.length;
+    this._sources.forEach((sc, i) => u.uSrc.value[i].set(sc[0], sc[1], sc[2], sc[3]));
+    this._sources.length = 0;
+    if (p.hrms !== undefined) u.uSurf.value.x = p.hrms;
 
     r.autoClear = false;
     u.uPrev.value = this.targets[this.current].texture;
@@ -264,12 +339,15 @@ export class FoamField {
   measure() {
     if (this._statsPending) return;
     const r = this.renderer, prev = r.getRenderTarget();
+    this.coverMat.uniforms.uState.value = this.texture;
+    this.quad.material = this.coverMat;
+    r.setRenderTarget(this.coverTarget); r.render(this.scene, this.camera);
     this.statsMat.uniforms.uState.value = this.texture;
     this.quad.material = this.statsMat;
     r.setRenderTarget(this.statsTarget); r.render(this.scene, this.camera);
     this._statsPending = true;
-    r.readRenderTargetPixelsAsync(this.statsTarget, 0, 0, 1, 1, this._statsBuf)
-      .then((b) => { Object.assign(this.stats, { active: b[0], residual: b[1], lace: b[2], coverage: b[3] }); this.stats.samples++; })
+    r.readRenderTargetPixelsAsync(this.statsTarget, 0, 0, 2, 1, this._statsBuf)
+      .then((b) => { Object.assign(this.stats, { active: b[0], residual: b[1], lace: b[2], fresh: b[3], coverage: b[4] }); this.stats.samples++; })
       .catch(() => {})
       .finally(() => { this._statsPending = false; });
     const gl = r.getContext(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
@@ -296,8 +374,8 @@ export class FoamField {
 
   dispose() {
     this.targets.forEach((t) => t.dispose());
-    this.statsTarget.dispose(); this.crestTarget?.dispose();
-    this.updateMat.dispose(); this.statsMat.dispose(); this.crestMat?.dispose();
+    this.statsTarget.dispose(); this.coverTarget.dispose(); this.crestTarget?.dispose();
+    this.updateMat.dispose(); this.statsMat.dispose(); this.coverMat.dispose(); this.crestMat?.dispose();
     this.quad.geometry.dispose();
   }
 }
