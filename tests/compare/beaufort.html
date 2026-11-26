@@ -71,18 +71,21 @@ window.__cmp = {
     const p = THREE.MathUtils.degToRad(pitch);
     camera.lookAt(look.x * Math.cos(p) * 100, camHeight + Math.sin(p) * 100, look.z * Math.cos(p) * 100);
     const gl = renderer.getContext();
+    // 白浪读数取最后 10 s 的时间平均（单个时刻随波群起伏，抽样误差约 ±20%）
+    const avgFrom = Math.max(0, steps - Math.round(10 / dt)), acc = { coverage: 0, active: 0, residual: 0, lace: 0, n: 0 };
     for (let i = 0; i < steps; i++) {
       sky.update(dt, { camera, timeOfDay: tod, cloudCover: B.clouds, storm: B.storm, wind, sunAzimuth: sunAz });
       ocean.update(dt, camera, sky);
       if (i % 6 === 5) { gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); await new Promise((r) => setTimeout(r, 0)); }
+      if (i >= avgFrom) { const st = ocean.foam.stats; for (const k of ['coverage', 'active', 'residual', 'lace']) acc[k] += st[k]; acc.n++; }
     }
     // 地平线所在的屏幕行（自上而下的比例）：视线俯角 = 地平线俯角（≈ √(2h/R)）
     const dip = Math.sqrt(2 * camHeight / 6.371e6);
     const horizonFrac = 0.5 - Math.tan(-p - dip) / (2 * Math.tan(THREE.MathUtils.degToRad(fov / 2)));
     renderer.toneMappingExposure = (exposure ?? autoExposure(horizonFrac)) * Math.pow(2, ev);
     renderer.render(scene, camera);
-    const r = ocean.readout, st = ocean.foam.stats;
-    return { force, U: u, Hs: r.Hs, simHs: r.simulatedHs, Tp: r.Tp, coverage: st.coverage, active: st.active, residual: st.residual, lace: st.lace,
+    const r = ocean.readout, n = Math.max(acc.n, 1);
+    return { force, U: u, Hs: r.Hs, simHs: r.simulatedHs, Tp: r.Tp, coverage: acc.coverage / n, active: acc.active / n, residual: acc.residual / n, lace: acc.lace / n,
       monahan: r.whitecap, horizonFrac, exposure: renderer.toneMappingExposure };
   },
 };
