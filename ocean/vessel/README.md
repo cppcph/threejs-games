@@ -54,7 +54,7 @@ driveWake(yacht, hullWake, dt);                   // 船行波 → WakeMap.creat
 | `stability(heels)` | 静稳性曲线 `[{ heel, GZ, RM, trim, y }]` |
 | `particulars` | 主尺度、质量分布、惯性、附加质量、阻尼、固有周期 |
 
-遥测（`telemetry`）：`speed / speedKn`（对水）、`sog / cog`、`yaw`、`heading`（罗经方位，0 = 北 = −Z）、`leeway`（顺时针为正 = 向右舷横漂）、`heel`（+ = 右舷下沉）、`pitch`（+ = 船首抬起）、`tws / twa`、`aws / awa`（帆受力中心处、横倾后的有效视风；+ = 右舷来风）、`awsMasthead / awaMasthead`、`vmg`、`sailCL / sailCD / flat / reef / sheet / boomAngle`、`driveForce / sideForce`、`heelingMoment / rightingMoment`、`resistance { friction, residuary, induced, appendage, radiation, windage, total }`、`sideForceKeel / Rudder / Hull`、`rudderAngle`、`helm`（+ = 上风舵）、`Fn`、`hullSpeedKn`、`displacement`（瞬时水压竖直力 / g）、`mass`、`wettedArea / wettedAreaHull`、`waterplaneArea`、`motor`（油门，滤波后）/ `thrust`（N）、`grounded / groundForce / groundContacts`。力、力矩、阻力分解做了 τ = 0.5 s 的平滑。
+遥测（`telemetry`）：`speed / speedKn`（对水）、`sog / cog`、`yaw`、`heading`（罗经方位，0 = 北 = −Z）、`leeway`（顺时针为正 = 向右舷横漂）、`heel`（+ = 右舷下沉）、`pitch`（+ = 船首抬起）、`tws / twa`、`aws / awa`（帆受力中心处、横倾后的有效视风；+ = 右舷来风）、`awsMasthead / awaMasthead`、`vmg`、`sailCL / sailCD / flat / reef / sheet / boomAngle`、`driveForce / sideForce`、`heelingMoment / rightingMoment`、`resistance { friction, residuary, induced, appendage, radiation, waves, windage, total }`（船体各力换到世界坐标后取逆着对水航向的水平分量；`waves` 是浪里水压积分的水平分量，即波浪附加阻力，平静水面为 0；`radiation` 是竖直力，恒为 0，只为兼容保留）、`sideForceKeel / Rudder / Hull`、`rudderAngle`、`helm`（+ = 上风舵）、`Fn`、`hullSpeedKn`、`displacement`（瞬时水压竖直力 / g）、`mass`、`wettedArea / wettedAreaHull`、`waterplaneArea`、`motor`（油门，滤波后）/ `thrust`（N）、`grounded / groundForce / groundContacts`。力、力矩、阻力分解做了 τ = 0.5 s 的平滑。
 
 ### 接入 examples/ocean/main.js（替换 Buoyancy + 极曲线）
 
@@ -162,6 +162,7 @@ M_h·v̇_h = F_h − ψ̇ ŷ × (M_h v_h)          M_h = m + A（横荡、升沉
   | Rr/(ρg∇) | 0.0012 | 0.0032 | 0.0067 | 0.0162 | 0.0358 | 0.0583 |
   Fn ≈ 0.4 以上陡增：船速饱和在船体速度附近（L_WL = 8.58 m，Fn 0.4 = 7.13 kn）。
 - **受风**：船体 ORC 公式 A = fbav·((1−d)B + dL)，d = ½(1 − cos2β)，C_D = 0.816；桅杆与静索 1.8 m²，C_D = 1。
+- **波浪附加阻力**：没有单独的公式，来自浪里的水压积分（第 3 节）：船首、船尾、两舷的瞬时湿面积随相对波面变化，水平合力的均值不为零（遥测 `resistance.waves`）。真风 14 kn、真风角 52°、自动舵：Hs 0.37 m / Tp 2.5 s 的短浪（λ ≈ 1.1 L）里沿航向 ≈ 240 N、向下风 ≈ 200 N，船速 6.49 → 5.36 kn；顶风滑行（5 kn 起、帆抖）12 s 后平静水面还有 2.8 kn，Hs 1.15 m / 5.4 s 顶浪里只剩 0.5–1.1 kn（平均附加阻力约 450 N）。按 Gerritsma & Beukelman (1972) 的无量纲化 σ_aw = R_aw / (ρg·2σ²·B²/L)（σ² 为波面方差，B 取水线宽 ≈ 2.6 m）：短浪 ≈ 1.8，长顶浪低速 ≈ 0.3；船舶在 λ ≈ L 的规则顶浪里 σ_aw 峰值通常有几到十，所以量级合理。浪里迎风换舷要带着速度。**不传 `waveNumber`、海面又没有 `model.readout` 时 k = 0**（动压不随深度衰减），同样的浪里阻力约大一倍（上例 5.36 → 4.09 kn）；自己写的海面请传谱峰波数。
 
 ### 6. 龙骨、舵、船体升力
 
@@ -271,6 +272,7 @@ T = T₀ · (m² − m·V_a / V_p)，V_a = (1 − w)·桨处对水轴向速度  
 
 - J. Kerner, *Water interaction model for boats in video games*, Gamasutra 2015（第 1 部分：水压积分）/ 2016（第 2 部分：粘性阻力、压力阻力、砰击）
 - ITTC (1957) 模型–实船相关线；S. F. Hoerner, *Fluid-Dynamic Drag* (1965)
+- J. Gerritsma & W. Beukelman (1972) *Analysis of the resistance increase in waves of a fast cargo ship*, International Shipbuilding Progress 19（附加阻力的无量纲化与量级）
 - J. A. Keuning & M. Katgert (2008) *A bare hull resistance prediction method derived from the results of the DSYHS extended to higher speeds*；Keuning & Sonnenberg (1998)；F. Fossati, *Aero-Hydrodynamics and the Performance of Sailing Yachts* (2009)
 - ORC VPP Documentation（帆系数、k_heff、f(flat)、twist、舷边入水修正、受风）；G. Hazen (1980)；L. Larsson & R. Eliasson, *Principles of Yacht Design*
 - H. Helmbold (1942)；R. T. Jones (1946)；Prandtl 升力线

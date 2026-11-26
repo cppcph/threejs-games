@@ -709,10 +709,14 @@ export class SailingYacht {
     quatIntegrate(this._q, w[0], w[1], w[2], h);
     // —— 遥测累加（子步平均）——
     acc.n++;
-    acc.Rf += o.Ff[0] !== 0 || o.Ff[2] !== 0 ? -(o.Ff[0] * Vb[0] + o.Ff[2] * Vb[2]) / Math.max(Math.hypot(Vb[0], Vb[2]), 1e-3) : 0;
+    // 船体水压、摩擦、阻尼都换到世界坐标，取水平面里逆着对水航向的分量（正 = 阻力）。
+    // 辐射阻尼与砰击是世界竖直力，水平分量为 0，不是阻力；浪里水压积分（静水力 + FK）的水平分量就是波浪附加阻力，平静水面为 0
+    const cux = Vh > 1e-3 ? vhx / Vh : R[2], cuz = Vh > 1e-3 ? vhz / Vh : R[8];
+    const along = (F) => -((R[0] * F[0] + R[1] * F[1] + R[2] * F[2]) * cux + (R[6] * F[0] + R[7] * F[1] + R[8] * F[2]) * cuz);
+    acc.Rf += along(o.Ff); acc.Rwv += along(o.F);
     acc.Rr += Rr; acc.Rw += windDrag;
     acc.Ri += K.out.induced + Rf.out.induced + Hf.out.induced; acc.Ra += K.out.profile + Rf.out.profile;
-    acc.Rd += -(o.Fd[0] * Vb[0] + o.Fd[2] * Vb[2]) / Math.max(Math.hypot(Vb[0], Vb[2]), 1e-3);
+    acc.Rd += along(o.Fd);
     acc.drive += rig.main.f[2] + rig.jib.f[2]; acc.side += rig.main.f[0] + rig.jib.f[0];
     acc.hm += this._rollMoment(rig.main) + this._rollMoment(rig.jib);
     acc.rm += o.M[2]; acc.disp += FyWorld / G; acc.wet += o.wetArea + o.wetAreaAppendages; acc.wetHull += o.wetArea; acc.wp += o.wpArea;
@@ -750,7 +754,7 @@ export class SailingYacht {
 
   _clearAcc() {
     const a = this._acc;
-    for (const k of ['n', 'Rf', 'Rr', 'Rw', 'Ri', 'Ra', 'Rd', 'drive', 'side', 'hm', 'rm', 'disp', 'wet', 'wetHull', 'wp', 'keelSide', 'rudSide', 'hullSide', 'thrust']) a[k] = 0;
+    for (const k of ['n', 'Rf', 'Rr', 'Rw', 'Ri', 'Ra', 'Rd', 'Rwv', 'drive', 'side', 'hm', 'rm', 'disp', 'wet', 'wetHull', 'wp', 'keelSide', 'rudSide', 'hullSide', 'thrust']) a[k] = 0;
   }
 
   // ------------------------------------------------------------------ 输出
@@ -794,7 +798,8 @@ export class SailingYacht {
       heelingMoment: Math.abs(sm('hm', acc.hm / an)), rightingMoment: Math.abs(sm('rm', acc.rm / an)),
       resistance: {
         friction: sm('Rf', acc.Rf / an), residuary: sm('Rr', acc.Rr / an), induced: sm('Ri', acc.Ri / an), appendage: sm('Ra', acc.Ra / an),
-        radiation: sm('Rd', acc.Rd / an), windage: sm('Rw', acc.Rw / an), total: sm('Rt', (acc.Rf + acc.Rr + acc.Ri + acc.Ra + acc.Rd + acc.Rw) / an),
+        radiation: sm('Rd', acc.Rd / an), waves: sm('Rwv', acc.Rwv / an), windage: sm('Rw', acc.Rw / an),
+        total: sm('Rt', (acc.Rf + acc.Rr + acc.Ri + acc.Ra + acc.Rd + acc.Rwv + acc.Rw) / an),
       },
       sideForceKeel: sm('ks', acc.keelSide / an), sideForceRudder: sm('rs', acc.rudSide / an), sideForceHull: sm('hs', acc.hullSide / an),
       rudderAngle: this.autopilot.rudder / DEG, helm: this.autopilot.rudder / DEG * (twa >= 0 ? 1 : -1),

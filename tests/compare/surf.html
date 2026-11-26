@@ -8,7 +8,8 @@
 </head>
 <body>
 <script type="module">
-// 岸边碎浪对照：坡度 1:40 的平直沙滩，向岸风浪，相机站在沙滩上看海（对照 CC0 实拍“Ocean surface waves”）。
+// 岸边碎浪对照：坡度 1:40 的平直沙滩，向岸风浪 + 涌浪，相机在岸上 8 m 高处用长焦俯看碎浪带
+// （对照 CC0 实拍“Ocean surface waves”：温带海岸的浑水，看不到海底，画面里没有地平线）。
 //   window.__cmp.render({ U, fetch, slope, ... }) 推进到稳态后渲染一帧
 import * as THREE from 'three';
 import { Ocean } from '../../ocean/index.js';
@@ -22,7 +23,8 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(40, W / H, 0.3, 200000);
 const sky = new SkyEnvironment(renderer, { cubeSize: 256 });
-scene.add(sky.object);
+scene.add(sky.object, sky.lights);
+const ambient = new THREE.AmbientLight(0xffffff, 1); scene.add(ambient);
 const ocean = new Ocean(renderer, { quality: 'high', sea: { wind: { x: 0, z: 8 }, fetch: 50e3, depth: 30, timeScale: 1 } });
 scene.add(ocean.mesh);
 
@@ -59,7 +61,11 @@ function autoExposure() {
 
 window.__cmp = {
   ocean, sky,
-  async render({ U = 7, fetch = 30e3, slope = 1 / 40, steps = 450, dt = 1 / 15, camHeight = 2.2, camZ = 6, pitch = -3.5, tod = 17.2, sunAz = 0.4, clouds = 0.7, swell = { Hs: 0.9, Tp: 9, theta: Math.PI / 2 } } = {}) {
+  // absorb：漫衰减系数（1/m，红绿蓝）。默认按 Jerlov 近岸水体（3–5 类）取值，透明的大洋水约 (0.45, 0.09, 0.06)
+  async render({ U = 7, fetch = 30e3, slope = 1 / 40, steps = 450, dt = 1 / 15, camHeight = 8, camZ = 6, pitch = -14, fov = 24, tod = 14.5, sunAz = 0.4, clouds = 0.65,
+    absorb = [0.7, 0.35, 0.4], swell = { Hs: 0.9, Tp: 9, theta: Math.PI / 2 } } = {}) {
+    ocean.material.uniforms.uAbsorb.value.set(...absorb);
+    camera.fov = fov; camera.updateProjectionMatrix();
     const m = ocean.model;
     m.setWind(0.25 * U, U); m.snapWind(); m.setFetch(fetch); m.setDepth(30);
     m.calm(); m.develop(1); m.setBackgroundSwell(swell);
@@ -73,6 +79,7 @@ window.__cmp = {
     for (let i = 0; i < steps; i++) {
       sky.update(dt, { camera, timeOfDay: tod, cloudCover: clouds, storm: 0, wind, sunAzimuth: sunAz });
       ocean.update(dt, camera, sky);
+      ambient.color.copy(sky.ambientColor).multiplyScalar(Math.PI);   // 平均辐亮度 → 辐照度
       if (i % 6 === 5) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); await new Promise((r) => setTimeout(r, 0)); }
     }
     renderer.toneMappingExposure = autoExposure();
