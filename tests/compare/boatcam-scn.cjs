@@ -24,11 +24,17 @@ module.exports = async (page, h) => {
     bowside: { pos: [1.55, 0.95, 1.0], look: [0.9, -1.6, 6.0], fov: 75 },
     // 船尾正后方，朝后看尾迹：对照船尾尾迹镜头
     stern: { pos: [0.0, 1.6, -4.4], look: [0.0, -2.2, -22.0], fov: 75 },
-    // 船首前视：对照船首相机（地平线、前帆）
-    bow: { pos: [0.0, 1.7, 3.2], look: [0.0, 0.8, 40.0], fov: 85 },
   };
   const sync = () => page.evaluate(() => { const gl = window.__demo.ocean.renderer.getContext(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4)); });
   for (const [name, v] of Object.entries(views)) {
+    // 太阳放在相机身后（实拍画面里没有太阳闪光带）：13 时的太阳水平方向转到与视线相反
+    await page.evaluate((v) => {
+      const D = window.__demo, g = D.boat.group, P = g.position.constructor;
+      const a = g.localToWorld(new P(...v.pos)), b = g.localToWorld(new P(...v.look));
+      const h = (D.S.tod - 12) / 24 * 2 * Math.PI, lat = D.sky.latitude;
+      const a0 = Math.atan2(Math.cos(h) * Math.sin(lat), -Math.sin(h));
+      D.S.sunAz = Math.atan2(-(b.z - a.z), -(b.x - a.x)) - a0;
+    }, v);
     await page.evaluate((v) => {
       window.__demo.cameraOverride = (cam, group) => {
         const p = group.localToWorld(new (cam.position.constructor)(...v.pos));
